@@ -2,6 +2,8 @@
 
 Train the models for depth map estimation of transparent structures
 
+TODO: DOC
+
 '''
 
 import argparse

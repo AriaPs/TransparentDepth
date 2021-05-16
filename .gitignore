@@ -1,5 +1,5 @@
-DenseDepth/__pycache__/*
-DenseDepth/utils/__pycache__/*
+__pycache__/*
+utils/__pycache__/*
 logs
 data
 

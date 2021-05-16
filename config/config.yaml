@@ -3,24 +3,24 @@ train:
   # For datasets, please pass atleast 1 value. If no datasets exist, pass "" as path for images.
   # Synthetic datasets with ground truth depths
   datasetsTrain:
-      - images: '/mnt/hgfs/Se6/c/test/BT/DenseDepth/data/train/rgb-imgs'
-        depths: '/mnt/hgfs/Se6/c/test/BT/DenseDepth/data/train/depth-imgs-rectified'
+      - images: './data/train/rgb-imgs'
+        depths: './data/train/depth-imgs-rectified'
      
 
   # Synthetic datasets with ground truth depths - 10% split of train
   datasetsVal:
-      - images: '/mnt/hgfs/Se6/c/test/BT/DenseDepth/data/val/rgb-imgs'
-        depths: '/mnt/hgfs/Se6/c/test/BT/DenseDepth/data/val/depth-imgs-rectified'
+      - images: './data/val/rgb-imgs'
+        depths: './data/val/depth-imgs-rectified'
 
   # Real Images (no ground truth depths)
   datasetsTestReal:
-      - images: '/mnt/hgfs/Se6/c/test/BT/DenseDepth/data/test/rgb-imgs'
-        depths: '/mnt/hgfs/Se6/c/test/BT/DenseDepth/data/test/depth-imgs-rectified'
+      - images: './data/test/rgb-imgs'
+        depths: './data/test/depth-imgs-rectified'
 
   # Synthetic datasets with ground truth depths - Used as test set
   datasetsTestSynthetic:
-      - images: '/mnt/hgfs/Se6/c/test/BT/DenseDepth/data/test/rgb-imgs'
-        depths: '/mnt/hgfs/Se6/c/test/BT/DenseDepth/data/test/depth-imgs-rectified'
+      - images: './data/test/rgb-imgs'
+        depths: './data/test/depth-imgs-rectified'
 
   
   # Training/Validation Params
@@ -40,7 +40,7 @@ train:
 
   
   continueTraining: False # If true, continue training from a checkpoint
-  pathPrevCheckpoint: "/mnt/hgfs/Se6/c/test/BT/DenseDepth/logs/exp-000/checkpoints/checkpoint-epoch-0000.pth" # Path to .pth checkpoint file to load to continue training from
+  pathPrevCheckpoint: "./logs/exp-000/checkpoints/checkpoint-epoch-0000.pth" # Path to .pth checkpoint file to load to continue training from
   initOptimizerFromCheckpoint: False # Re-Initialize optimizer's state from checkpoint. NOTE: when this is enabled, value of learningRate will be overridden with value from checkpoint.
   loadEpochNumberFromCheckpoint: False # If true, the epoch/iter numbering will start from the checkpoint's last epoch num.
 
@@ -71,8 +71,8 @@ eval:
   # Synthetic datasets with ground truth depths
   # Used as validation set
   datasetsSynthetic:
-    - images: '/mnt/hgfs/Se6/c/test/BT/DenseDepth/data/val/rgb-imgs'
-      depths: '/mnt/hgfs/Se6/c/test/BT/DenseDepth/data/val/depth-imgs-rectified'
+    - images: './data/val/rgb-imgs'
+      depths: './data/val/depth-imgs-rectified'
 
   # Datasets of real images, no depths available
   # Used as Test set
@@ -92,6 +92,6 @@ eval:
   imgWidth: 256
   os: 8
   numWorkers: 1 # Num of workers used in the dataloader
-  pathWeightsFile: "/mnt/hgfs/Se6/c/test/BT/DenseDepth/logs/exp-000/checkpoints/checkpoint-epoch-0000.pth" # Path to the checkpoint to be loaded
-  resultsDir: "/mnt/hgfs/Se6/c/test/BT/DenseDepth/data/results"
+  pathWeightsFile: "./logs/exp-000/checkpoints/checkpoint-epoch-0000.pth" # Path to the checkpoint to be loaded
+  resultsDir: "./data/results"
 

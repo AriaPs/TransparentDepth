@@ -197,9 +197,9 @@ if __name__ == '__main__':
     max = 1.5
     augs = augs_train
     input_only = ["gaus-blur", "grayscale", "gaus-noise", "brightness", "contrast", "hue-sat", "color-jitter"]
-    l = '/mnt/hgfs/Se6/c/test/BT/DenseDepth/data/train/depth-imgs-rectified/d.png'
-    db_test = ClearGraspsDataset(input_dir='/mnt/hgfs/Se6/c/test/BT/DenseDepth/data/train/rgb-imgs',
-                                    depth_dir='/mnt/hgfs/Se6/c/test/BT/DenseDepth/data/train/depth-imgs-rectified',
+    
+    db_test = ClearGraspsDataset(input_dir='./data/train/rgb-imgs',
+                                    depth_dir='./data/train/depth-imgs-rectified',
                                     transform=augs,
                                     input_only=input_only)
 

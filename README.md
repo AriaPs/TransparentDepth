@@ -5,11 +5,6 @@ System prerequisites
 
 //TODO
 
-Features
-
-//TODO
-
-
 Getting started
 
 //TODO
@@ -18,3 +13,12 @@ Getting started
 Run project
 
 //TODO
+
+
+Reference and Credits
+//TODO
+ClearGrasp: 
+https://github.com/Shreeyak/cleargrasp
+
+DenseDepth:
+https://github.com/ialhashim/DenseDepth

@@ -1,4 +1,9 @@
-'''Train unet for surface normals
+'''
+
+Evalidate the models for depth map estimation of transparent structures
+
+TODO: DOC
+
 '''
 import argparse
 import csv
