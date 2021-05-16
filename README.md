@@ -1,21 +1,22 @@
 # TransparentDepth
 Bachelor Thesis: Monocular Depth Map Estimation of Transparent Structures
 
-System prerequisites
+##System prerequisites
 
 //TODO
 
-Getting started
-
-//TODO
-
-
-Run project
+##Getting started
 
 //TODO
 
 
-Reference and Credits
+##Run project
+
+//TODO
+
+
+##Reference and Credits
+
 //TODO
 ClearGrasp: 
 https://github.com/Shreeyak/cleargrasp
