@@ -1,33 +1,39 @@
 #!/usr/bin/env python3
 
+'''
+
+Dataset Class for ClearGrasp Data set.
+
+Note: This file is adapted from ClearGrasp Dataset class implementation.
+
+'''
+
 import os
 import glob
-import sys
 from PIL import Image
-import Imath
 import numpy as np
 
 import torch
-import torch.nn as nn
 from torch.utils.data import Dataset
 from torchvision import transforms
 from imgaug import augmenters as iaa
 import imgaug as ia
-import imageio
-import cv2
 
-from utils.utils import exr_loader, depthTensor2rgbTensor, depth2rgb
+from utils.api import exr_loader, depthTensor2rgbTensor, imageTensor2PILTensor
 
 
 class ClearGraspsDataset(Dataset):
     """
-    Dataset class for training model 
+    Dataset class for a subset of the ClearGrasp data set which is used for monocular depth map
+    estimation. 
 
-    //TODO: DOC
 
     Args:
         input_dir (str): Path to folder containing the input images (.png format).
-        transform (imgaug transforms): imgaug Transforms to be applied to the imgs
+        depth_dir (str): Path to folder containing the depth maps (.exr format).
+        transform (imgaug transforms): imgaug Transforms to be applied to the imgs.
+        transform (list of str): A list of imgaug Transform names to be applied only on the imgs.
+        isSynthetic (bool): Whether loading synthetic data set.
 
     """
 
@@ -37,8 +43,7 @@ class ClearGraspsDataset(Dataset):
             depth_dir='',
             transform=None,
             input_only=None,
-            outputImgWidth = 256,
-            outputImgHeight = 256,
+            isSynthetic= True,
     ):
 
         super().__init__()
@@ -51,11 +56,14 @@ class ClearGraspsDataset(Dataset):
         # Create list of filenames
         self._datalist_input = []  # Variable containing list of all input images filenames in dataset
         self._datalist_depth = []
-        self._extension_input = ['-rgb.jpg']  # The file extension of input images
-        self._extension_depth = ['-depth-rectified.exr']
+        if(isSynthetic):
+            self._extension_input = ['-rgb.jpg']  # The file extension of input images 
+            self._extension_depth = ['-depth-rectified.exr']
+        else:
+            self._extension_input = ['-transparent-rgb-img.jpg']  # The file extension of input images  
+            self._extension_depth = ['-opaque-depth-img.exr']
+        
         self._create_lists_filenames(self.images_dir, self.depth_dir)
-        self.outputImgWidth = outputImgWidth
-        self.outputImgHeight = outputImgHeight
 
     def __len__(self):
         return len(self._datalist_input)
@@ -76,14 +84,15 @@ class ClearGraspsDataset(Dataset):
         image_path = self._datalist_input[index]
         _img = Image.open(image_path).convert('RGB')
         _img = np.array(_img)
+        _img = np.ascontiguousarray(_img)
+        
 
         # Open depths
         if self.depth_dir:
             depth_path = self._datalist_depth[index]
-            _depth = exr_loader(depth_path, ndim=1) 
-            #_depth = cv2.resize(_depth, (self.outputImgWidth, self.outputImgHeight), interpolation=cv2.INTER_NEAREST)
-            _depth[np.isnan(_depth)] = 0
-            _depth[np.isinf(_depth)] = 0
+            _depth = exr_loader(depth_path, ndim=1)
+            _depth[np.isnan(_depth)] = -1.0
+            _depth[np.isinf(_depth)] = -1.0
             _depth = np.expand_dims(_depth, axis=0)
 
         # Apply image augmentations and convert to Tensor
@@ -99,14 +108,15 @@ class ClearGraspsDataset(Dataset):
                 _depth = _depth.transpose((1, 2, 0))  # To Shape: (H, W, 3)
                 _depth = det_tf.augment_image(_depth, hooks=ia.HooksImages(activator=self._activator_masks))
                 _depth = _depth.transpose((2, 0, 1))  # To Shape: (3, H, W)
+                _depth = np.ascontiguousarray(_depth)
 
             
         # Return Tensors
-        _img_tensor = transforms.ToTensor()(_img.copy())
+        # Scale from range [0, 255] to [0.0, 1.0]
+        _img_tensor = transforms.ToTensor()(_img.copy()) / 255
 
         if self.depth_dir:
             _depth_tensor = torch.from_numpy(_depth.copy())
-            #_depth_tensor = nn.functional.normalize(_depth_tensor, p=2, dim=0)
         else:
             _depth_tensor = torch.zeros((3, _img_tensor.shape[1], _img_tensor.shape[2]), dtype=torch.float32)
 
@@ -169,39 +179,84 @@ if __name__ == '__main__':
     from torch.utils.data import DataLoader
     from torchvision import transforms
     import torchvision
-    import imageio
 
     # Example Augmentations using imgaug
     imsize = 512
     augs_train = iaa.Sequential([
         # Geometric Augs
-         iaa.Scale((imsize, imsize), 0), # Resize image
-         iaa.Fliplr(0.5),
-         iaa.Flipud(0.5),
-         iaa.Rot90((0, 4)),
-         # Blur and Noise
-         iaa.Sometimes(0.2, iaa.GaussianBlur(sigma=(0, 1.5), name="gaus-blur")),
-         iaa.Sometimes(0.1, iaa.Grayscale(alpha=(0.0, 1.0), from_colorspace="RGB", name="grayscale")),
-         iaa.Sometimes(0.2, iaa.AdditiveLaplaceNoise(scale=(0, 0.1*255), per_channel=True, name="gaus-noise")),
-         # Color, Contrast, etc.
-         iaa.Sometimes(0.2, iaa.Multiply((0.75, 1.25), per_channel=0.1, name="brightness")),
-         iaa.Sometimes(0.2, iaa.GammaContrast((0.7, 1.3), per_channel=0.1, name="contrast")),
-         iaa.Sometimes(0.2, iaa.AddToHueAndSaturation((-20, 20), name="hue-sat")),
-         iaa.Sometimes(0.3, iaa.Add((-20, 20), per_channel=0.5, name="color-jitter")),
-     ])
-    # augs_test = iaa.Sequential([
-    #     # Geometric Augs
-    #     iaa.Scale((imsize, imsize), 0),
-    # ])
+        iaa.Resize({
+            "height": imsize,
+            "width": imsize
+        }, interpolation='nearest'),
+        iaa.Fliplr(0.5),
+        iaa.Flipud(0.5),
+        iaa.Rot90((0, 4)),
+
+        # Bright Patches
+        iaa.Sometimes(
+            0.1,
+            iaa.blend.BlendAlpha(factor=(0.2, 0.7),
+                            foreground=iaa.blend.BlendAlphaSimplexNoise(foreground=iaa.Multiply((1.5, 3.0), per_channel=False),
+                                                              upscale_method='cubic',
+                                                              iterations=(1, 2)),
+                            name="simplex-blend")),
+
+        # Color Space Mods
+        iaa.Sometimes(
+            0.3,
+            iaa.OneOf([
+                iaa.Add((20, 20), per_channel=0.7, name="add"),
+                iaa.Multiply((1.3, 1.3), per_channel=0.7, name="mul"),
+                iaa.WithColorspace(to_colorspace="HSV",
+                                   from_colorspace="RGB",
+                                   children=iaa.WithChannels(
+                                       0, iaa.Add((-200, 200))),
+                                   name="hue"),
+                iaa.WithColorspace(to_colorspace="HSV",
+                                   from_colorspace="RGB",
+                                   children=iaa.WithChannels(
+                                       1, iaa.Add((-20, 20))),
+                                   name="sat"),
+                iaa.contrast.LinearContrast(
+                    (0.5, 1.5), per_channel=0.2, name="norm"),
+                iaa.Grayscale(alpha=(0.0, 1.0), name="gray"),
+            ])),
+
+        # Blur and Noise
+        iaa.Sometimes(
+            0.2,
+            iaa.SomeOf((1, None), [
+                iaa.OneOf([iaa.MotionBlur(k=3, name="motion-blur"),
+                           iaa.GaussianBlur(sigma=(0.5, 1.0), name="gaus-blur")]),
+                iaa.OneOf([
+                    iaa.AddElementwise(
+                        (-5, 5), per_channel=0.5, name="add-element"),
+                    iaa.MultiplyElementwise(
+                        (0.95, 1.05), per_channel=0.5, name="mul-element"),
+                    iaa.AdditiveGaussianNoise(
+                        scale=0.01 * 255, per_channel=0.5, name="guas-noise"),
+                    iaa.AdditiveLaplaceNoise(
+                        scale=(0, 0.01 * 255), per_channel=True, name="lap-noise"),
+                    iaa.Sometimes(1.0, iaa.Dropout(
+                        p=(0.003, 0.01), per_channel=0.5, name="dropout")),
+                ]),
+            ],
+                random_order=True))
+    ])
+    input_only = [
+        "simplex-blend", "add", "mul", "hue", "sat", "norm", "gray", "motion-blur", "gaus-blur", "add-element",
+        "mul-element", "guas-noise", "lap-noise", "dropout", "cdropout"
+    ]
     min = 0.1
     max = 1.5
     augs = augs_train
-    input_only = ["gaus-blur", "grayscale", "gaus-noise", "brightness", "contrast", "hue-sat", "color-jitter"]
+    #input_only = ["gaus-blur", "grayscale", "gaus-noise", "brightness", "contrast", "hue-sat", "color-jitter"]
     
-    db_test = ClearGraspsDataset(input_dir='./data/train/rgb-imgs',
-                                    depth_dir='./data/train/depth-imgs-rectified',
+    db_test = ClearGraspsDataset(input_dir='./DataSet/cleargrasp-dataset-test-val/real-val/d435',
+                                    depth_dir='./DataSet/cleargrasp-dataset-test-val/real-val/d435',
                                     transform=augs,
-                                    input_only=input_only)
+                                    input_only=input_only,
+                                    isSynthetic= False)
 
     batch_size = 4
     testloader = DataLoader(db_test, batch_size=batch_size, shuffle=True, num_workers=1, drop_last=True)
@@ -213,11 +268,9 @@ if __name__ == '__main__':
         print('image shape, type: ', img.shape, img.dtype)
         print('depth shape, type: ', depth.shape, depth.dtype)
         # Show Batch
-        im_vis1 = torchvision.utils.make_grid(img, nrow=batch_size // 4, padding=2, normalize=True, scale_each=True)
-        plt.imshow(im_vis1.numpy().transpose(1, 2, 0))
-        plt.show()
-        im_vis2 = torchvision.utils.make_grid(depthTensor2rgbTensor(depth), nrow=batch_size // 4, padding=2, normalize=True, scale_each=True)
-        plt.imshow(im_vis2.numpy().transpose(1, 2, 0))
+        dephs= torch.cat((imageTensor2PILTensor(img), depthTensor2rgbTensor(depth)), 2)
+        im_vis_depth = torchvision.utils.make_grid(dephs, nrow=batch_size // 2, normalize=True, scale_each=True)
+        plt.imshow(im_vis_depth.numpy().transpose(1, 2, 0))
         plt.show()
 
         break

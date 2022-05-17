@@ -1,248 +1,150 @@
 '''
-This module contains the loss functions used to train the surface normals estimation models.
+This module contains the loss functions used to train the models.
+
+Note: This file is adapted from AdaBins and DenseDepth framework.
+
 '''
 
-import math
 import torch
 import torch.nn as nn
+import kornia
 import numpy as np
+from pytorch3d.loss import chamfer_distance
+from torch.nn.utils.rnn import pad_sequence
 
-from termcolor import colored
 
 
-def loss_fn_cosine(input_vec, target_vec, reduction='sum'):
-    '''A cosine loss function for use with surface normals estimation.
-    Calculates the cosine loss between 2 vectors. Both should be of the same size.
+"""
+Taken from Python implematation of AdaBins 
+--> Computes SI loss for the model output and ground truth provided as tensors. 
+"""
+class SILogLoss(nn.Module):  # Main loss function used in AdaBins paper
+    def __init__(self):
+        super(SILogLoss, self).__init__()
+        self.name = 'SILog'
 
-    Arguments:
-        input_vec {tensor} -- The 1st vectors with whom cosine loss is to be calculated
-                              The dimensions of the matrices are expected to be (batchSize, 3, height, width).
-        target_vec {tensor } -- The 2nd vectors with whom cosine loss is to be calculated
-                                The dimensions of the matrices are expected to be (batchSize, 3, height, width).
+    def forward(self, input, target, mask=None, interpolate=True):
+        safe_log = lambda x: torch.log(torch.clamp(x, min=1e-6))
 
-    Keyword Arguments:
-        reduction {str} -- Can have values 'elementwise_mean' and 'none'.
-                           If 'elemtwise_mean' is passed, the mean of all elements is returned
-                           if 'none' is passed, a matrix of all cosine losses is returned, same size as input.
-                           (default: {'elementwise_mean'})
+        if interpolate:
+            input = nn.functional.interpolate(input, target.shape[-2:], mode='bilinear', align_corners=True)
 
-    Raises:
-        Exception -- Exception is an invalid reduction is passed
+        mask_invalid_pixels = torch.all(target <= 0)
+        target[mask_invalid_pixels] = 1e-6
+        input[mask_invalid_pixels] = 1e-6
 
-    Returns:
-        tensor -- A single mean value of cosine loss or a matrix of elementwise cosine loss.
-    '''
-    cos = nn.CosineSimilarity(dim=1, eps=1e-6)
-    loss_cos = 1.0 - cos(input_vec, target_vec)
 
+        g = safe_log(input) - safe_log(target)
+        # n, c, h, w = g.shape
+        # norm = 1/(h*w)
+        # Dg = norm * torch.sum(g**2) - (0.85/(norm**2)) * (torch.sum(g))**2
+
+        Dg = torch.var(g) + 0.15 * torch.pow(torch.mean(g), 2)
+        return 10 * torch.sqrt(Dg)
+
+"""
+Taken from Python implematation of AdaBins 
+--> Computes chamfer loss for the AdaBins module output and ground truth provided as tensors. 
+"""
+class BinsChamferLoss(nn.Module):  # Bin centers regularizer used in AdaBins paper
+    def __init__(self):
+        super().__init__()
+        self.name = "ChamferLoss"
+    def forward(self, bins, target_depth_maps):
+        bin_centers = 0.5 * (bins[:, 1:] + bins[:, :-1])
+        n, p = bin_centers.shape
+        input_points = bin_centers.view(n, p, 1)  # .shape = n, p, 1
+       # n, c, h, w = target_depth_maps.shape
+        target_points = target_depth_maps.flatten(1)  # n, hwc
+        mask = target_points.ge(1e-3)  # only valid ground truth points
+        target_points = [p[m] for p, m in zip(target_points, mask)]
+        target_lengths = torch.Tensor([len(t) for t in target_points]).long().to(target_depth_maps.device)
+        target_points = pad_sequence(target_points, batch_first=True).unsqueeze(2)  # .shape = n, T, 1
+        loss, _ = chamfer_distance(x=input_points, y=target_points, y_lengths=target_lengths)
+        return loss
+
+
+"""
+Adapted from Python implematation of DenseDepth 
+--> Computes SSIM loss for the model output and ground truth provided as tensors. It upsamples the model output
+ to ground truth size if [interpolate] is true
+
+"""
+def ssim(model_output, gt_vec, interpolate=True):
+    if interpolate:
+        model_output = nn.functional.interpolate(model_output, gt_vec.shape[-2:], mode='bilinear', align_corners=True)
     # calculate loss only on valid pixels
-    # mask_invalid_pixels = (target_vec[:, 0, :, :] == -1.0) & (target_vec[:, 1, :, :] == -1.0) & (target_vec[:, 2, :, :] == -1.0)
-    mask_invalid_pixels = torch.all(target_vec == -1, dim=1) & torch.all(target_vec == 0, dim=1)
-
-    loss_cos[mask_invalid_pixels] = 0.0
-    loss_cos_sum = loss_cos.sum()
-    total_valid_pixels = (~mask_invalid_pixels).sum()
-    error_output = loss_cos_sum / total_valid_pixels
-
-    if reduction == 'elementwise_mean':
-        loss_cos = error_output
-    elif reduction == 'sum':
-        loss_cos = loss_cos_sum
-    elif reduction == 'none':
-        loss_cos = loss_cos
-    else:
-        raise Exception(
-            'Invalid value for reduction  parameter passed. Please use \'elementwise_mean\' or \'none\''.format())
-
-    return loss_cos
+    mask_invalid_pixels = torch.all(gt_vec <= 0)
+    gt_vec[mask_invalid_pixels] = 0.0
+    model_output[mask_invalid_pixels] = 0.0
+    criterion = nn.L1Loss()
+    l_depth = criterion(model_output, gt_vec)
+    ssim = kornia.losses.SSIM(window_size=11,max_val=1.5/0.1)
+    l_ssim = torch.clamp((1 - ssim(model_output, gt_vec)) * 0.5, 0, 1)
+    loss = (1.0 * l_ssim.mean().item()) + (0.1 * l_depth)
+    return loss
 
 
-def metric_calculator_batch(input_vec, target_vec, mask=None):
-    """Calculate mean, median and angle error between prediction and ground truth
 
-    Args:
-        input_vec (tensor): The 1st vectors with whom cosine loss is to be calculated
-                            The dimensions of are expected to be (batchSize, 3, height, width).
-        target_vec (tensor): The 2nd vectors with whom cosine loss is to be calculated.
-                             This should be GROUND TRUTH vector.
-                             The dimensions are expected to be (batchSize, 3, height, width).
-        mask (tensor): The pixels over which loss is to be calculated. Represents VALID pixels.
-                             The dimensions are expected to be (batchSize, 3, height, width).
+def compute_errors(gt, pred, should_masked=True, dataset="clearGrasp", masks=None,):
+    '''Returns a dictionary containig the result of all evaluation metric.
 
-    Returns:
-        float: The mean error in 2 surface normals in degrees
-        float: The median error in 2 surface normals in degrees
-        float: The percentage of pixels with error less than 11.25 degrees
-        float: The percentage of pixels with error less than 22.5 degrees
-        float: The percentage of pixels with error less than 3 degrees
+        Args:
+            gt (Torch.tensor): The ground truth
+            pred (Torch.tensor): The network output
+            should_masked (bool): Whether mask all invalid pixel
 
-    """
-    if len(input_vec.shape) != 4:
-        raise ValueError('Shape of tensor must be [B, C, H, W]. Got shape: {}'.format(input_vec.shape))
-    if len(target_vec.shape) != 4:
-        raise ValueError('Shape of tensor must be [B, C, H, W]. Got shape: {}'.format(target_vec.shape))
-
-    INVALID_PIXEL_VALUE = 0  # All 3 channels should have this value
-    mask_valid_pixels = ~(torch.all(target_vec == INVALID_PIXEL_VALUE, dim=1))
-    if mask is not None:
-        mask_valid_pixels = (mask_valid_pixels.float() * mask).byte()
-    total_valid_pixels = mask_valid_pixels.sum()
-    if (total_valid_pixels == 0):
-        print('[WARN]: Image found with ZERO valid pixels to calc metrics')
-        return torch.tensor(0), torch.tensor(0), torch.tensor(0), torch.tensor(0), torch.tensor(0), mask_valid_pixels
-
-    cos = nn.CosineSimilarity(dim=1, eps=1e-6)
-    loss_cos = cos(input_vec, target_vec)
-
-    # Taking torch.acos() of 1 or -1 results in NaN. We avoid this by small value epsilon.
-    eps = 1e-10
-    loss_cos = torch.clamp(loss_cos, (-1.0 + eps), (1.0 - eps))
-    loss_rad = torch.acos(loss_cos)
-    loss_deg = loss_rad * (180.0 / math.pi)
-
-    # Mask out all invalid pixels and calc mean, median
-    loss_deg = loss_deg[mask_valid_pixels]
-    loss_deg_mean = loss_deg.mean()
-    loss_deg_median = loss_deg.median()
-
-    # Calculate percentage of vectors less than 11.25, 22.5, 30 degrees
-    percentage_1 = ((loss_deg < 11.25).sum().float() / total_valid_pixels) * 100
-    percentage_2 = ((loss_deg < 22.5).sum().float() / total_valid_pixels) * 100
-    percentage_3 = ((loss_deg < 30).sum().float() / total_valid_pixels) * 100
-
-    return loss_deg_mean, loss_deg_median, percentage_1, percentage_2, percentage_3
-
-
-def metric_calculator(input_vec, target_vec, mask=None):
-    """Calculate mean, median and angle error between prediction and ground truth
-
-    Args:
-        input_vec (tensor): The 1st vectors with whom cosine loss is to be calculated
-                            The dimensions of are expected to be (3, height, width).
-        target_vec (tensor): The 2nd vectors with whom cosine loss is to be calculated.
-                             This should be GROUND TRUTH vector.
-                             The dimensions are expected to be (3, height, width).
-        mask (tensor): Optional mask of area where loss is to be calculated. All other pixels are ignored.
-                       Shape: (height, width), dtype=uint8
-
-    Returns:
-        float: The mean error in 2 surface normals in degrees
-        float: The median error in 2 surface normals in degrees
-        float: The percentage of pixels with error less than 11.25 degrees
-        float: The percentage of pixels with error less than 22.5 degrees
-        float: The percentage of pixels with error less than 3 degrees
-
-    """
-    if len(input_vec.shape) != 3:
-        raise ValueError('Shape of tensor must be [C, H, W]. Got shape: {}'.format(input_vec.shape))
-    if len(target_vec.shape) != 3:
-        raise ValueError('Shape of tensor must be [C, H, W]. Got shape: {}'.format(target_vec.shape))
-
-    INVALID_PIXEL_VALUE = 0  # All 3 channels should have this value
-    mask_valid_pixels = ~(torch.all(target_vec == INVALID_PIXEL_VALUE, dim=0))
-    if mask is not None:
-        mask_valid_pixels = (mask_valid_pixels.float() * mask).byte()
-    total_valid_pixels = mask_valid_pixels.sum()
-    # TODO: How to deal with a case with zero valid pixels?
-    if (total_valid_pixels == 0):
-        print('[WARN]: Image found with ZERO valid pixels to calc metrics')
-        return torch.tensor(0), torch.tensor(0), torch.tensor(0), torch.tensor(0), torch.tensor(0), mask_valid_pixels
-
-    cos = nn.CosineSimilarity(dim=0, eps=1e-6)
-    loss_cos = cos(input_vec, target_vec)
-
-    # Taking torch.acos() of 1 or -1 results in NaN. We avoid this by small value epsilon.
-    eps = 1e-10
-    loss_cos = torch.clamp(loss_cos, (-1.0 + eps), (1.0 - eps))
-    loss_rad = torch.acos(loss_cos)
-    loss_deg = loss_rad * (180.0 / math.pi)
-
-    # Mask out all invalid pixels and calc mean, median
-    loss_deg = loss_deg[mask_valid_pixels]
-    loss_deg_mean = loss_deg.mean()
-    loss_deg_median = loss_deg.median()
-
-    # Calculate percentage of vectors less than 11.25, 22.5, 30 degrees
-    percentage_1 = ((loss_deg < 11.25).sum().float() / total_valid_pixels) * 100
-    percentage_2 = ((loss_deg < 22.5).sum().float() / total_valid_pixels) * 100
-    percentage_3 = ((loss_deg < 30).sum().float() / total_valid_pixels) * 100
-
-    return loss_deg_mean, loss_deg_median, percentage_1, percentage_2, percentage_3, mask_valid_pixels
-
-
-# TODO: Fix the loss func to ignore invalid pixels
-def loss_fn_radians(input_vec, target_vec, reduction='sum'):
-    '''Loss func for estimation of surface normals. Calculated the angle between 2 vectors
-    by taking the inverse cos of cosine loss.
-
-    Arguments:
-        input_vec {tensor} -- First vector with whole loss is to be calculated.
-                              Expected size (batchSize, 3, height, width)
-        target_vec {tensor} -- Second vector with whom the loss is to be calculated.
-                               Expected size (batchSize, 3, height, width)
-
-    Keyword Arguments:
-        reduction {str} -- Can have values 'elementwise_mean' and 'none'.
-                           If 'elemtwise_mean' is passed, the mean of all elements is returned
-                           if 'none' is passed, a matrix of all cosine losses is returned, same size as input.
-                           (default: {'elementwise_mean'})
-
-    Raises:
-        Exception -- If any unknown value passed as reduction argument.
-
-    Returns:
-        tensor -- Loss from 2 input vectors. Size depends on value of reduction arg.
+        Returns:
+            dict(str, float): A dictionary having the name of metric as key and the result as value
     '''
 
-    cos = nn.CosineSimilarity(dim=1, eps=1e-6)
-    loss_cos = cos(input_vec, target_vec)
-    loss_rad = torch.acos(loss_cos)
-    if reduction == 'elementwise_mean':
-        loss_rad = torch.mean(loss_rad)
-    elif reduction == 'sum':
-        loss_rad = torch.sum(loss_rad)
-    elif reduction == 'none':
-        pass
+    safe_log = lambda x: np.log(np.clip(x, 1e-6, 1e6))
+    safe_log10 = lambda x: np.log10(np.clip(x, 1e-6, 1e6))
+
+    if masks !=None :
+        if dataset == "nyu":
+            mask = (gt <= 0)
+            mask[45:471, 41:601] = 0
+        else:
+            mask = (masks == 0)
+            #_label = np.zeros(masks.shape, dtype=np.uint8)
+            #_label[masks==1] = 1
+            #print(_label.shape, pred.shape, gt.shape)
+            #gt = gt * _label
+            #pred = pred * _label
+            #gt = gt.flatten()
+            #pred = pred.flatten()
+            #_label = _label.flatten()
+            ##print(_label.shape, pred.shape, gt.shape)
+            #m = _label == 1
+            #gt = gt[m]
+            #pred = pred[m]
+        
+        gt = np.ma.masked_array(gt, mask=mask)
+        pred = np.ma.masked_array(pred, mask=mask)
+    
     else:
-        raise Exception(
-            'Invalid value for reduction  parameter passed. Please use \'elementwise_mean\' or \'none\''.format())
+        gt = gt.numpy()
+        pred = pred.numpy()
+        
+    thresh = np.maximum((gt / pred), (pred / gt))
+    a1 = (thresh < 1.25).mean()
+    a2 = (thresh < 1.25 ** 2).mean()
+    a3 = (thresh < 1.25 ** 3).mean()
 
-    return loss_rad
+    err = gt - pred
+    abs_rel = np.mean(np.abs(err) / gt)
+    sq_rel = np.mean((err ** 2) / gt)
 
+    rmse = np.sqrt(np.mean(err ** 2))
 
-def cross_entropy2d(logit, target, ignore_index=255, weight=None, batch_average=True):
-    """
-    The loss is
+    rmse_log = (safe_log(gt) - safe_log(pred)) ** 2
+    rmse_log = np.sqrt(rmse_log.mean())
 
-    .. math::
-        \sum_{i=1}^{\\infty} x_{i}
+    err = safe_log(pred) - safe_log(gt)
+    silog = np.sqrt(np.mean(err ** 2) - np.mean(err) ** 2) * 100
 
-        `(minibatch, C, d_1, d_2, ..., d_K)`
+    log_10 = (np.abs(safe_log10(gt) - safe_log10(pred))).mean()
 
-    Args:
-        logit (Tensor): Output of network
-        target (Tensor): Ground Truth
-        ignore_index (int, optional): Defaults to 255. The pixels with this labels do not contribute to loss
-        weight (List, optional): Defaults to None. Weight assigned to each class
-        batch_average (bool, optional): Defaults to True. Whether to consider the loss of each element in the batch.
-
-    Returns:
-        Float: The value of loss.
-    """
-
-    n, c, h, w = logit.shape
-    target = target.squeeze(1)
-
-    if weight is None:
-        criterion = nn.CrossEntropyLoss(weight=weight, ignore_index=ignore_index, reduction='sum')
-    else:
-        criterion = nn.CrossEntropyLoss(weight=torch.tensor(weight, dtype=torch.float32),
-                                        ignore_index=ignore_index,
-                                        reduction='sum')
-
-    loss = criterion(logit, target.long())
-
-    if batch_average:
-        loss /= n
-
-    return loss
+    return dict(a1=a1, a2=a2, a3=a3, abs_rel=abs_rel, rmse=rmse, log_10=log_10, rmse_log=rmse_log,
+                silog=silog, sq_rel=sq_rel)

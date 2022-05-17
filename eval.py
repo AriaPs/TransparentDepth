@@ -2,7 +2,7 @@
 
 Evalidate the models for depth map estimation of transparent structures
 
-TODO: DOC
+Note: This file is adapted from ClearGrasp evaluation framework.
 
 '''
 import argparse
@@ -10,331 +10,365 @@ import csv
 import errno
 import os
 import glob
-import io
 import shutil
 
 from termcolor import colored
 import yaml
 from attrdict import AttrDict
-import imageio
-import numpy as np
-import h5py
 from PIL import Image
-import cv2
 from torch.utils.data import DataLoader
 from torchvision.utils import make_grid
 import torch
 import torch.nn as nn
-import imgaug as ia
 from imgaug import augmenters as iaa
 from tqdm import tqdm
 
-import model
 import dataloader
-import loss_functions
-from utils import utils
+import dataloader_clearGrasp
+import dataloader_nyu
+import dataloader_transDepth
+from utils import framework_eval, model_io
+from models.DenseDepth import DenseDepth
+from models.AdaBin import UnetAdaptiveBins
 
-print('Depth Map Estimation of transparent structures. Loading checkpoint...')
+os.environ["CUDA_VISIBLE_DEVICES"] = "2"
+device_ids = [0]
 
-parser = argparse.ArgumentParser(
-    description='Run eval of depth completion on synthetic data')
-parser.add_argument('-c', '--configFile', required=True,
-                    help='Path to config yaml file', metavar='path/to/config')
-args = parser.parse_args()
 
-###################### Load Config File #############################
-CONFIG_FILE_PATH = args.configFile  # 'config/config.yaml'
-with open(CONFIG_FILE_PATH) as fd:
-    config_yaml = yaml.safe_load(fd)
-config = AttrDict(config_yaml)
+def create_csv(csv_filename, csv_dir):
+    '''Creates a csv file in the given path and returns a list of its header field names. 
 
-###################### Load Checkpoint and its data #############################
-if not os.path.isfile(config.eval.pathWeightsFile):
-    raise ValueError('Invalid path to the given weights file in config. The file "{}" does not exist'.format(
-        config.eval.pathWeightsFile))
+        Args:
+            csv_filename (str): The csv file name
+            csv_dir (str): The csv save path
 
-# Read config file stored in the model checkpoint to re-use it's params
-CHECKPOINT = torch.load(config.eval.pathWeightsFile, map_location='cpu')
-if 'model_state_dict' in CHECKPOINT:
-    print(colored('Loaded data from checkpoint {}'.format(
-        config.eval.pathWeightsFile), 'green'))
+        Returns:
+            List of str: A list of its header field names. 
+    '''
 
-    config_checkpoint_dict = CHECKPOINT['config']
-    config_checkpoint = AttrDict(config_checkpoint_dict)
-else:
-    raise ValueError('The checkpoint file does not have model_state_dict in it.\
-                     Please use the newer checkpoint files!')
+    field_names = ["Model", "Image Num", "a1", "a2", "a3", "abs_rel",
+                       "rmse", "log_10", "rmse_log", "silog", "sq_rel"]
+    with open(os.path.join(csv_dir, csv_filename), 'w') as csvfile:
+        writer = csv.DictWriter(
+            csvfile, fieldnames=field_names, delimiter=',')
+        writer.writeheader()
+    return field_names
 
-# Create directory to save results
-SUBDIR_RESULT = 'results'
-SUBDIR_IMG = 'img_files'
+def get_test_DataSet(config):
+    '''Returns a dictionary containig all DataLoader classes for test data sets with respect to specified arguments 
+        in the config yaml file. 
 
-results_root_dir = config.eval.resultsDir
-runs = sorted(glob.glob(os.path.join(results_root_dir, 'exp-*')))
-prev_run_id = int(runs[-1].split('-')[-1]) if runs else 0
-results_dir = os.path.join(results_root_dir, 'exp-{:03d}'.format(prev_run_id))
-if os.path.isdir(os.path.join(results_dir, SUBDIR_RESULT)):
-    NUM_FILES_IN_EMPTY_FOLDER = 0
-    if len(os.listdir(os.path.join(results_dir, SUBDIR_RESULT))) > NUM_FILES_IN_EMPTY_FOLDER:
-        prev_run_id += 1
-        results_dir = os.path.join(
-            results_root_dir, 'exp-{:03d}'.format(prev_run_id))
+        Args:
+            config (dict): The parsed configuration YAML file
+
+        Returns:
+            dict(str, DataLoader): A dictionary having the name of DataLoader as key and the DataLoader as value
+    '''
+
+    if(config.eval.dataset =="nyu"):
+        return {'NYU Depth V2 Test Set': dataloader_nyu.NYUDepthDataLoader(config, 'test').data }
+    elif(config.eval.dataset =="transDepth"):
+        return {'TransDepth Test Set': dataloader_transDepth.TransDepthDataLoader(config.eval.transDepthDatasetTest, config.eval.batchSize, config.eval.numWorkers, 'test').data }
+    else:
+        return get_ClearGrasp_DataLoader(config)
+
+     
+def get_ClearGrasp_DataLoader(config):
+    
+    # Make new dataloaders for each synthetic dataset
+    db_test_list_synthetic = []
+    if config.eval.datasetsTestSynthetic is not None:
+        for dataset in config.eval.datasetsTestSynthetic:
+            print('Creating Synthetic Images dataset from: "{}"'.format(dataset.images))
+            if dataset.images:
+                db = dataloader_clearGrasp.ClearGraspsDataset(input_dir=dataset.images,
+                                                    mask_dir= dataset.mask,
+                                                   depth_dir=dataset.depths,
+                                                   width=config.train.imgWidth,
+                                                   height=config.train.imgHeight,
+                                                   mode='test')
+                db_test_list_synthetic.append(db)
+
+    # Make new dataloaders for each real dataset
+    db_test_list_real = []
+    if config.eval.datasetsTestReal is not None:
+        for dataset in config.eval.datasetsTestReal:
+            print('Creating Real Images dataset from: "{}"'.format(dataset.images))
+            if dataset.images:
+                db = dataloader_clearGrasp.ClearGraspsDataset(input_dir=dataset.images,
+                                                   mask_dir= dataset.mask,
+                                                   depth_dir=dataset.depths,
+                                                   width=config.train.imgWidth,
+                                                   height=config.train.imgHeight,
+                                                   mode='test',
+                                                   isSynthetic=False)
+                db_test_list_real.append(db)
+
+    # Create pytorch dataloaders from datasets
+    dataloaders_dict = {}
+    if db_test_list_synthetic:
+        db_test_synthetic = torch.utils.data.ConcatDataset(
+            db_test_list_synthetic)
+        testLoader_synthetic = DataLoader(db_test_synthetic,
+                                          batch_size=config.eval.batchSize,
+                                          shuffle=False,
+                                          num_workers=config.eval.numWorkers,
+                                          drop_last=False)
+        dataloaders_dict.update({'synthetic': testLoader_synthetic})
+
+    if db_test_list_real:
+        db_test_real = torch.utils.data.ConcatDataset(db_test_list_real)
+        testLoader_real = DataLoader(db_test_real,
+                                     batch_size=config.eval.batchSize,
+                                     shuffle=False,
+                                     num_workers=config.eval.numWorkers,
+                                     drop_last=False)
+        dataloaders_dict.update({'real': testLoader_real})
+
+    assert (len(dataloaders_dict) >
+            0), 'No valid datasets given in config.yaml to run inference on!'
+
+    return dataloaders_dict
+
+def get_ClearGrasp_DataLoader_with_imgaug(config):
+    augs_test = iaa.Sequential([
+        iaa.Resize({
+            "height": config.eval.imgHeight,
+            "width": config.eval.imgWidth
+        }, interpolation='nearest'),
+    ])
+
+    # Make new dataloaders for each synthetic dataset
+    db_test_list_synthetic = []
+    if config.eval.datasetsTestSynthetic is not None:
+        for dataset in config.eval.datasetsTestSynthetic:
+            print('Creating Synthetic Images dataset from: "{}"'.format(dataset.images))
+            if dataset.images:
+                db = dataloader.ClearGraspsDataset(input_dir=dataset.images,
+                                                   depth_dir=dataset.depths,
+                                                   transform=augs_test,
+                                                   input_only=None)
+                db_test_list_synthetic.append(db)
+
+    # Make new dataloaders for each real dataset
+    db_test_list_real = []
+    if config.eval.datasetsTestReal is not None:
+        for dataset in config.eval.datasetsTestReal:
+            print('Creating Real Images dataset from: "{}"'.format(dataset.images))
+            if dataset.images:
+                db = dataloader.ClearGraspsDataset(input_dir=dataset.images,
+                                                   depth_dir=dataset.depths,
+                                                   transform=augs_test,
+                                                   input_only=None,
+                                                   isSynthetic=False)
+                db_test_list_real.append(db)
+
+    # Create pytorch dataloaders from datasets
+    dataloaders_dict = {}
+    if db_test_list_synthetic:
+        db_test_synthetic = torch.utils.data.ConcatDataset(
+            db_test_list_synthetic)
+        testLoader_synthetic = DataLoader(db_test_synthetic,
+                                          batch_size=config.eval.batchSize,
+                                          shuffle=False,
+                                          num_workers=config.eval.numWorkers,
+                                          drop_last=False)
+        dataloaders_dict.update({'synthetic': testLoader_synthetic})
+
+    if db_test_list_real:
+        db_test_real = torch.utils.data.ConcatDataset(db_test_list_real)
+        testLoader_real = DataLoader(db_test_real,
+                                     batch_size=config.eval.batchSize,
+                                     shuffle=False,
+                                     num_workers=config.eval.numWorkers,
+                                     drop_last=False)
+        dataloaders_dict.update({'real': testLoader_real})
+
+    assert (len(dataloaders_dict) >
+            0), 'No valid datasets given in config.yaml to run inference on!'
+
+    return dataloaders_dict
+
+
+if __name__ == '__main__':
+
+    print('Depth Map Estimation of transparent structures. Loading checkpoint...')
+
+    parser = argparse.ArgumentParser(
+        description='Run eval of depth completion on synthetic and real test dataset')
+    parser.add_argument('-c', '--configFile', required=True,
+                        help='Path to config yaml file', metavar='path/to/config')
+    args = parser.parse_args()
+
+    ###################### Load Config File #############################
+    CONFIG_FILE_PATH = args.configFile  # 'config/config.yaml'
+    with open(CONFIG_FILE_PATH) as fd:
+        config_yaml = yaml.safe_load(fd)
+    config = AttrDict(config_yaml)
+
+    # Create directory to save results
+    SUBDIR_RESULT = 'results'
+    SUBDIR_IMG = 'img_files'
+
+    results_root_dir = config.eval.resultsDir
+    runs = sorted(glob.glob(os.path.join(results_root_dir, 'exp-*')))
+    prev_run_id = int(runs[-1].split('-')[-1]) if runs else 0
+    results_dir = os.path.join(
+        results_root_dir, 'exp-{:03d}'.format(prev_run_id))
+    if os.path.isdir(os.path.join(results_dir, SUBDIR_RESULT)):
+        NUM_FILES_IN_EMPTY_FOLDER = 0
+        if len(os.listdir(os.path.join(results_dir, SUBDIR_RESULT))) > NUM_FILES_IN_EMPTY_FOLDER:
+            prev_run_id += 1
+            results_dir = os.path.join(
+                results_root_dir, 'exp-{:03d}'.format(prev_run_id))
+            os.makedirs(results_dir)
+    else:
         os.makedirs(results_dir)
-else:
-    os.makedirs(results_dir)
 
-try:
-    os.makedirs(os.path.join(results_dir, SUBDIR_RESULT))
-    os.makedirs(os.path.join(results_dir, SUBDIR_IMG))
-except OSError as exc:
-    if exc.errno != errno.EEXIST:
-        raise
-    pass
+    try:
+        os.makedirs(os.path.join(results_dir, SUBDIR_RESULT))
+        os.makedirs(os.path.join(results_dir, SUBDIR_IMG))
+    except OSError as exc:
+        if exc.errno != errno.EEXIST:
+            raise
+        pass
 
-shutil.copy2(CONFIG_FILE_PATH, os.path.join(results_dir, 'config.yaml'))
-print('Saving results to folder: ' +
-      colored('"{}"\n'.format(results_dir), 'blue'))
+    csv_dir = os.path.join(results_dir, SUBDIR_RESULT)
 
-# Create CSV File to store error metrics
-csv_filename = 'computed_errors_exp_{:03d}.csv'.format(prev_run_id)
-field_names = ["Image Num", "Mean", "Median", "<11.25", "<22.5", "<30"]
-with open(os.path.join(results_dir, csv_filename), 'w') as csvfile:
-    writer = csv.DictWriter(csvfile, fieldnames=field_names, delimiter=',')
-    writer.writeheader()
+    shutil.copy2(CONFIG_FILE_PATH, os.path.join(results_dir, 'config.yaml'))
+    print('Saving results to folder: ' +
+          colored('"{}"\n'.format(results_dir), 'blue'))
 
-###################### DataLoader #############################
-augs_test = iaa.Sequential([
-    iaa.Resize({
-        "height": config.eval.imgHeight,
-        "width": config.eval.imgWidth
-    }, interpolation='nearest'),
-])
+    ###################### DataLoader #############################
 
-# Make new dataloaders for each synthetic dataset
-db_test_list_synthetic = []
-if config.eval.datasetsSynthetic is not None:
-    for dataset in config.eval.datasetsSynthetic:
-        print('Creating Synthetic Images dataset from: "{}"'.format(dataset.images))
-        if dataset.images:
-            db = dataloader.ClearGraspsDataset(input_dir=dataset.images,
-                                               depth_dir=dataset.depths,
-                                               transform=augs_test,
-                                               input_only=None)
-            db_test_list_synthetic.append(db)
+    dataloaders_dict = get_test_DataSet(config)
 
-# Make new dataloaders for each real dataset
-db_test_list_real = []
-if config.eval.datasetsReal is not None:
-    for dataset in config.eval.datasetsReal:
-        print('Creating Real Images dataset from: "{}"'.format(dataset.images))
-        if dataset.images:
-            db = dataloader.ClearGraspsDataset(input_dir=dataset.images,
-                                               depth_dir=dataset.depths,
-                                               transform=augs_test,
-                                               input_only=None)
-            db_test_list_real.append(db)
+    ###################### ModelBuilder #############################
 
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if torch.cuda.device_count() > 1:
+            print("Let's use", torch.cuda.device_count(), "GPUs!")
 
-# Create pytorch dataloaders from datasets
-dataloaders_dict = {}
-if db_test_list_synthetic:
-    db_test_synthetic = torch.utils.data.ConcatDataset(db_test_list_synthetic)
-    testLoader_synthetic = DataLoader(db_test_synthetic,
-                                      batch_size=config.eval.batchSize,
-                                      shuffle=False,
-                                      num_workers=config.eval.numWorkers,
-                                      drop_last=False)
-    dataloaders_dict.update({'synthetic': testLoader_synthetic})
+    if config.eval.compareResult or config.eval.densedepth.should_validate:
+        # DenseDepth
+        densedepth_model = DenseDepth()
+        if config.eval.loadProjektCheckpoints:
+            _ , densedepth_model = model_io.load_checkpoint(
+            config.eval.densedepth.pathWeightsFile, densedepth_model)
+        else:
+            densedepth_model = model_io.load_origin_Checkpoint(config.eval.densedepth.pathWeightsFile, 'densedepth', densedepth_model) 
+        # Enable Multi-GPU training
+        if torch.cuda.device_count() > 1:
+            densedepth_model = nn.DataParallel(densedepth_model)
+        densedepth_model = densedepth_model.to(device)
 
-if db_test_list_real:
-    db_test_real = torch.utils.data.ConcatDataset(db_test_list_real)
-    testLoader_real = DataLoader(db_test_real,
-                                 batch_size=config.eval.batchSize,
-                                 shuffle=False,
-                                 num_workers=config.eval.numWorkers,
-                                 drop_last=False)
-    dataloaders_dict.update({'real': testLoader_real})
+    if config.eval.compareResult or config.eval.adabin.should_validate:
+        # Adabin
+        adabin_model = UnetAdaptiveBins.build(n_bins=config.eval.adabin.n_bins, min_val=config.eval.min_depth,
+                                              max_val=config.eval.max_depth, norm=config.eval.adabin.norm)
+        if config.eval.loadProjektCheckpoints:
+            _ , adabin_model = model_io.load_checkpoint(
+            config.eval.adabin.pathWeightsFile, adabin_model)
+        else:
+            adabin_model = model_io.load_origin_Checkpoint(config.eval.adabin.pathWeightsFile, 'adabin', adabin_model)
+        # Enable Multi-GPU training
+        if torch.cuda.device_count() > 1:
+            adabin_model = nn.DataParallel(adabin_model)
+        adabin_model = adabin_model.to(device)
 
-
-assert (len(dataloaders_dict) >
-        0), 'No valid datasets given in config.yaml to run inference on!'
-
-
-# Resize Tensor
-def resize_tensor(input_tensor, height, width):
-    augs_depth_resize = iaa.Sequential(
-        [iaa.Resize({"height": height, "width": width}, interpolation='nearest')])
-    det_tf = augs_depth_resize.to_deterministic()
-    input_tensor = input_tensor.numpy().transpose(0, 2, 3, 1)
-    resized_array = det_tf.augment_images(input_tensor)
-    resized_array = torch.from_numpy(resized_array.transpose(0, 3, 1, 2))
-    resized_array = resized_array.type(torch.DoubleTensor)
-
-    return resized_array
-
-
-###################### ModelBuilder #############################
-if config.eval.model == 'densedepth':
-    model = model.Model()
-
-model_state = CHECKPOINT['model_state_dict']
-new_model_state = {}
-for key in model_state.keys():
-    new_model_state[key[7:]] = model_state[key]
-
-model.load_state_dict(new_model_state)
-
-# Enable Multi-GPU training
-if torch.cuda.device_count() > 1:
-    print("Let's use", torch.cuda.device_count(), "GPUs!")
-    # dim = 0 [30, xxx] -> [10, ...], [10, ...], [10, ...] on 3 GPUs
-    model = nn.DataParallel(model)
-
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-model = model.to(device)
-model.eval()
-
-### Select Loss Func ###
-if config_checkpoint.train.lossFunc == 'cosine':
-    criterion = loss_functions.loss_fn_cosine
-elif config_checkpoint.train.lossFunc == 'radians':
-    criterion = loss_functions.loss_fn_radians
-else:
-    raise ValueError('Invalid lossFunc from config file. Can only be "cosine" or "radians".\
-                     Value passed is: {}'.format(config_checkpoint.train.lossFunc))
-
-### Run Validation and Test Set ###
-print('\nInference - Surface Normal Estimation')
-print('-' * 50 + '\n')
-print(colored('Results will be saved to: {}\n'.format(
-    config.eval.resultsDir), 'green'))
-
-for key in dataloaders_dict:
-    print('Running inference on {} dataset:'.format(key))
-    print('=' * 30)
-
-    running_loss = 0.0
-    running_mean = []
-    running_median = []
-    running_percentage1 = []
-    running_percentage2 = []
-    running_percentage3 = []
-
-    testLoader = dataloaders_dict[key]
-    for ii, sample_batched in enumerate(tqdm(testLoader)):
-        # NOTE: In raw data, invalid surface normals are represented by [-1, -1, -1]. However, this causes
-        #       problems during normalization of vectors. So they are represented as [0, 0, 0] in our dataloader output.
-
-        inputs, depths = sample_batched
-
-        if config.eval.model == 'densedepth':
-            depths_resized = resize_tensor(depths, int(
-                depths.shape[2] / 2), int(depths.shape[3] / 2))
-            depths_resized = depths_resized.to(device).double()
-
-        # Forward pass of the mini-batch
-        inputs = inputs.to(device)
-        depths = depths.to(device)
-
-        with torch.no_grad():
-            model_output = model(inputs)
-
-        loss = criterion(model_output, depths_resized,
-                         reduction='elementwise_mean')
-        running_loss += loss.item()
-
-        # loss_deg_mean, loss_deg_median, percentage_1, percentage_2, percentage_3 = loss_functions.metric_calculator_batch(
-        #     model_output_norm, depths)
-        # print('Batch {:09d} Mean: {:.4f} deg'.format(ii, loss_deg_mean.item()))
-        # print('Batch {:09d} Median: {:.4f} deg'.format(ii, loss_deg_median.item()))
-        # print('Batch {:09d} P1: {:.4f} %'.format(ii, percentage_1.item()))
-        # print('Batch {:09d} P2: {:.4f} %'.format(ii, percentage_2.item()))
-        # print('Batch {:09d} P3: {:.4f} %'.format(ii, percentage_3.item()))
-        # print('Batch {:09d} num_images: {:d}'.format(ii, depths.shape[0]))
+    if config.eval.compareResult or config.eval.dpt.should_validate:
+        from models.DPT.models import DPTDepthModel
+        dpt_model = DPTDepthModel(
+            scale=0.000305,
+            shift=0.1378,
+            invert=True,
+            backbone="vitb_rn50_384",
+            non_negative=True,
+            enable_attention_hooks=False,
+        )
+        if config.eval.loadProjektCheckpoints:
+            _ , dpt_model = model_io.load_checkpoint(
+            config.eval.dpt.pathWeightsFile, dpt_model)
+        else:
+            dpt_model = model_io.load_origin_Checkpoint(config.eval.dpt.pathWeightsFile, 'dpt', dpt_model)
+        # Enable Multi-GPU training
+        if torch.cuda.device_count() > 1:
+            dpt_model = nn.DataParallel(dpt_model)
+        dpt_model = dpt_model.to(device)
+    
+    if config.eval.compareResult or config.eval.lapdepth.should_validate:
+        from models.LapDepth import LDRN
+        lapdepth_model = LDRN({
+                'lv6': False,
+                'encoder': 'ResNext101',
+                'norm': 'BN',
+                'act': 'ReLU',
+                'max_depth': config.eval.max_depth,
+            })
         
-        # Save output images, one at a time, to results
-        img_tensor = inputs.detach().cpu()
-        output_tensor = model_output.detach().cpu()
-        depth_tensor = depths.detach().cpu()
-        depths_resized = depths_resized.detach().cpu()
-
-        # Extract each tensor within batch and save results
-        for iii, sample_batched in enumerate(zip(img_tensor, output_tensor, depth_tensor, depths_resized)):
-            img, output, depth, depths_resized = sample_batched
-            
-            # Calc metrics
-            loss_deg_mean, loss_deg_median, percentage_1, percentage_2, percentage_3, mask_valid_pixels = loss_functions.metric_calculator(
-                output, depths_resized)
-            running_mean.append(loss_deg_mean.item())
-            running_median.append(loss_deg_median.item())
-            running_percentage1.append(percentage_1.item())
-            running_percentage2.append(percentage_2.item())
-            running_percentage3.append(percentage_3.item())
-
-            # Write the data into a csv file
-            with open(os.path.join(results_dir, csv_filename), 'a', newline='') as csvfile:
-                writer = csv.DictWriter(
-                    csvfile, fieldnames=field_names, delimiter=',')
-                row_data = [((ii * config.eval.batchSize) + iii),
-                            loss_deg_mean.item(),
-                            loss_deg_median.item(),
-                            percentage_1.item(),
-                            percentage_2.item(),
-                            percentage_3.item()]
-                writer.writerow(dict(zip(field_names, row_data)))
-
-            
-            # Save PNG and EXR Output
-            output_rgb = utils.depth2rgb(output[0].numpy())
-            output_rgb = cv2.resize(
-                output_rgb, (512, 288), interpolation=cv2.INTER_LINEAR)
-            output_path_rgb = os.path.join(results_dir, SUBDIR_IMG,
-                                           '{:09d}-depth.png'.format(ii * config.eval.batchSize + iii))
-            output_path_exr = os.path.join(results_dir, SUBDIR_IMG,
-                                           '{:09d}-depth.exr'.format(ii * config.eval.batchSize + iii))
-
-            #imageio.imwrite(output_path_rgb, output_rgb)
-            utils.exr_saver(output_path_exr, output[0].numpy())
-
-            # Save PNG and EXR Output
-            gt_rgb = utils.depth2rgb(depth[0].numpy())
-            gt_rgb = cv2.resize(
-                gt_rgb, (512, 288), interpolation=cv2.INTER_LINEAR)
-            gt_path_exr = os.path.join(results_dir, SUBDIR_IMG,
-                                           '{:09d}-depth-gt.exr'.format(ii * config.eval.batchSize + iii))
-
-            #imageio.imwrite(gt_path_rgb, gt_rgb)
-            utils.exr_saver(gt_path_exr, depth[0].numpy())
-
-            
-            img = img.numpy().transpose(1, 2, 0)
-            img = cv2.resize(
-                img, (512, 288), interpolation=cv2.INTER_LINEAR)
-            img_path_rgb = os.path.join(results_dir, SUBDIR_IMG,
-                                           '{:09d}-img.png'.format(ii * config.eval.batchSize + iii))
-
-            imageio.imwrite(img_path_rgb, img)
-
-            gt_output_path_rgb = os.path.join(results_dir, SUBDIR_IMG,
-                                           '{:09d}-gt-output.png'.format(ii * config.eval.batchSize + iii))
-            
-            grid_image = np.concatenate((gt_rgb, output_rgb), 1)
-            imageio.imwrite(gt_output_path_rgb, grid_image)
+        if config.eval.loadProjektCheckpoints:
+            _ , lapdepth_model = model_io.load_checkpoint(
+            config.eval.lapdepth.pathWeightsFile, lapdepth_model)
+        else:
+            lapdepth_model = model_io.load_origin_Checkpoint(config.eval.lapdepth.pathWeightsFile, 'lapdepth', lapdepth_model)
+        
+        # Enable Multi-GPU training
+        if torch.cuda.device_count() > 1:
+            lapdepth_model = nn.DataParallel(lapdepth_model)
+        lapdepth_model = lapdepth_model.to(device)
+        
 
 
+    ###################### Eval #############################
 
-    num_batches = len(testLoader)  # Num of batches
-    num_images = len(testLoader.dataset)  # Num of total images
-    print('\nnum_batches:', num_batches)
-    print('num_images:', num_images)
-    epoch_loss = running_loss / num_batches
-    print('Test Mean Loss: {:.4f}'.format(epoch_loss))
+    if config.eval.compareResult:
+        # if in compare modus compare all models
 
-    epoch_mean = sum(running_mean) / num_images
-    epoch_median = sum(running_median) / num_images
-    epoch_percentage1 = sum(running_percentage1) / num_images
-    epoch_percentage2 = sum(running_percentage2) / num_images
-    epoch_percentage3 = sum(running_percentage3) / num_images
-    print(
-        '\nTest Metrics - Mean: {:.2f}deg, Median: {:.2f}deg, P1: {:.2f}%, P2: {:.2f}%, p3: {:.2f}%, num_images: {}\n\n'
-        .format(epoch_mean, epoch_median, epoch_percentage1, epoch_percentage2, epoch_percentage3, num_images))
+        # Create CSV File to store error metrics
+        csv_filename = 'computed_errors_exp_{:03d}.csv'.format(prev_run_id)
+
+        field_names = create_csv(csv_filename, csv_dir)
+
+        framework_eval.validateAll(adabin_model, densedepth_model, dpt_model, lapdepth_model, device, config, dataloaders_dict,
+                                   field_names, csv_filename, csv_dir, results_dir, SUBDIR_IMG)
+    else:
+        # else compare only the specified models
+        if config.eval.densedepth.should_validate:
+
+            # Create CSV File to store error metrics
+            csv_filename = 'densedepth_computed_errors_exp_{:03d}.csv'.format(prev_run_id)
+
+            field_names = create_csv(csv_filename, csv_dir)
+
+            framework_eval.validateDenseDepht(densedepth_model, device, config, dataloaders_dict,
+                                              field_names, csv_filename, csv_dir, results_dir, SUBDIR_IMG)
+
+        elif config.eval.adabin.should_validate:
+
+            # Create CSV File to store error metrics
+            csv_filename = 'adabin_computed_errors_exp_{:03d}.csv'.format(prev_run_id)
+
+            field_names = create_csv(csv_filename, csv_dir)
+
+            framework_eval.validateAdaBin(adabin_model, device, config, dataloaders_dict,
+                                          field_names, csv_filename, csv_dir, results_dir, SUBDIR_IMG)
+        
+        elif config.eval.dpt.should_validate:
+
+            # Create CSV File to store error metrics
+            csv_filename = 'dpt_computed_errors_exp_{:03d}.csv'.format(prev_run_id)
+
+            field_names = create_csv(csv_filename, csv_dir)
+
+            framework_eval.validateDPT(dpt_model, device, config, dataloaders_dict,
+                                          field_names, csv_filename, csv_dir, results_dir, SUBDIR_IMG) 
+        
+        elif config.eval.lapdepth.should_validate:
+
+            # Create CSV File to store error metrics
+            csv_filename = 'dpt_computed_errors_exp_{:03d}.csv'.format(prev_run_id)
+
+            field_names = create_csv(csv_filename, csv_dir)
+
+            framework_eval.validateLapDepth(lapdepth_model, device, config, dataloaders_dict,
+                                          field_names, csv_filename, csv_dir, results_dir, SUBDIR_IMG) 

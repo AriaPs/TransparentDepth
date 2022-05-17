@@ -3,95 +3,161 @@ train:
   # For datasets, please pass atleast 1 value. If no datasets exist, pass "" as path for images.
   # Synthetic datasets with ground truth depths
   datasetsTrain:
-      - images: './data/train/rgb-imgs'
-        depths: './data/train/depth-imgs-rectified'
+      - images: './DataSet/cleargrasp-dataset-train/cup-with-waves-train/rgb-imgs'
+        depths: './DataSet/cleargrasp-dataset-train/cup-with-waves-train/depth-imgs-rectified'
+      - images: './DataSet/cleargrasp-dataset-train/flower-bath-bomb-train/rgb-imgs'
+        depths: './DataSet/cleargrasp-dataset-train/flower-bath-bomb-train/depth-imgs-rectified'
+      - images: './DataSet/cleargrasp-dataset-train/heart-bath-bomb-train/rgb-imgs'
+        depths: './DataSet/cleargrasp-dataset-train/heart-bath-bomb-train/depth-imgs-rectified'
+      - images: './DataSet/cleargrasp-dataset-train/square-plastic-bottle-train/rgb-imgs'
+        depths: './DataSet/cleargrasp-dataset-train/square-plastic-bottle-train/depth-imgs-rectified'
+      - images: './DataSet/cleargrasp-dataset-train/stemless-plastic-champagne-glass-train/rgb-imgs'
+        depths: './DataSet/cleargrasp-dataset-train/stemless-plastic-champagne-glass-train/depth-imgs-rectified'
      
 
-  # Synthetic datasets with ground truth depths - 10% split of train
-  datasetsVal:
-      - images: './data/val/rgb-imgs'
-        depths: './data/val/depth-imgs-rectified'
-
-  # Real Images (no ground truth depths)
-  datasetsTestReal:
-      - images: './data/test/rgb-imgs'
-        depths: './data/test/depth-imgs-rectified'
-
-  # Synthetic datasets with ground truth depths - Used as test set
-  datasetsTestSynthetic:
-      - images: './data/test/rgb-imgs'
-        depths: './data/test/depth-imgs-rectified'
-
+  # Real Images (no complete ground truth depths) - 1/3 split of Real Images set
+  datasetsValReal:
+      - images: './DataSet/cleargrasp-dataset-test-val/real-val/d435'
+        depths: './DataSet/cleargrasp-dataset-test-val/real-val/d435'
   
-  # Training/Validation Params
-  model: "densedepth" # Possible values: ['densedepth']
+  # Synthetic datasets with ground truth depths - 10% split of train
+  datasetsValSynthetic:
+      - images: './DataSet/cleargrasp-dataset-test-val/synthetic-val/cup-with-waves-val/rgb-imgs'
+        depths: './DataSet/cleargrasp-dataset-test-val/synthetic-val/cup-with-waves-val/depth-imgs-rectified'
+      - images: './DataSet/cleargrasp-dataset-test-val/synthetic-val/flower-bath-bomb-val/rgb-imgs'
+        depths: './DataSet/cleargrasp-dataset-test-val/synthetic-val/flower-bath-bomb-val/depth-imgs-rectified'
+      - images: './DataSet/cleargrasp-dataset-test-val/synthetic-val/heart-bath-bomb-val/rgb-imgs'
+        depths: './DataSet/cleargrasp-dataset-test-val/synthetic-val/heart-bath-bomb-val/depth-imgs-rectified'
+      - images: './DataSet/cleargrasp-dataset-test-val/synthetic-val/square-plastic-bottle-val/rgb-imgs'
+        depths: './DataSet/cleargrasp-dataset-test-val/synthetic-val/square-plastic-bottle-val/depth-imgs-rectified'
+      - images: './DataSet/cleargrasp-dataset-test-val/synthetic-val/stemless-plastic-champagne-glass-val/rgb-imgs'
+        depths: './DataSet/cleargrasp-dataset-test-val/synthetic-val/stemless-plastic-champagne-glass-val/depth-imgs-rectified'
+
+  # TransDepth paths
+
+  transDepthDatasetTrain: '/gris/gris-f/homelv/ajamili/vc/setGen/output_train/'
+
+  transDepthDatasetVal: '/gris/gris-f/homelv/ajamili/vc/setGen/output_val/'
+        
+  model: "densedepth" # Possible values: ['densedepth', 'adabin', 'dpt', 'lapdepth']
+  adabin:
+    n_bins: 256
+    min_depth: 0.1
+    max_depth: 1.5
+    norm: 'linear'
+  dataset: 'transDepth' # Possible Values: ['clearGrasp', 'nyu',transDepth] 
   batchSize: 4
-  validationBatchSize: 4
-  testBatchSize: 4
-  numEpochs: 1
-  imgHeight: 256
-  imgWidth: 256
-  numInputChannels: 3 # Num of channels in input image. RGB = 3 channels, Grayscale = 1 channel.
+  validationBatchSize: 8
+  testBatchSize: 8
+  numEpochs: 3
+  imgHeight: 480
+  imgWidth: 640
   numWorkers: 1 # Num of workers used in the dataloader
   logsDir: "logs" # Directory where logs of each exp will be saved.
-  lossFunc: "cosine" # Possible values: ['cosine', 'radians']
-  percentageDataForTraining: 1.0 # The percentage of images in dataset to be used for training.
-  percentageDataForValidation: 1.0
+  lossFunc: "SILog" # Possible values: ['SSIM','SILog', ]
+  percentageDataForTraining: 1.0 # The percentage of images in training dataset to be used for training.
+  percentageDataForValidation: 1.0 # The percentage of images in validation dataset to be used for validation.
 
   
-  continueTraining: False # If true, continue training from a checkpoint
-  pathPrevCheckpoint: "./logs/exp-000/checkpoints/checkpoint-epoch-0000.pth" # Path to .pth checkpoint file to load to continue training from
+
+  
+  continueTraining: True # If true, continue training from a checkpoint
+  loadProjektCheckpoints: False # If true, dont load origin checkpoints instead continue training from a thesis checkpoint
+  # "./models/AdaBin/weights/origin/AdaBins_nyu.pt" "./models/DenseDepth/weights/origin/nyu.h5" "./models/DPT/weights/origin/dpt_hybrid_nyu-2ce69ec7.pt"
+  #  "./models/LapDepth/weights/origin/LDRN_NYU_ResNext101_pretrained_data.pkl" "./logs/exp-000/checkpoints/checkpoint-epoch-0001.pth" 
+  pathPrevCheckpoint: "./models/DenseDepth/weights/origin/nyu.h5" # Path to .pth checkpoint file to load to continue training from 
   initOptimizerFromCheckpoint: False # Re-Initialize optimizer's state from checkpoint. NOTE: when this is enabled, value of learningRate will be overridden with value from checkpoint.
   loadEpochNumberFromCheckpoint: False # If true, the epoch/iter numbering will start from the checkpoint's last epoch num.
 
-  saveImageInterval: 1 # Log output images to tensorboard every saveImageInterval epochs
-  saveImageIntervalIter: 100 # Every N iterations, log output images to tensorboard
-  testInterval: 1 # Run on test set every nTestInterval epochs. Keep at 0 to skip tests.
-  saveModelInterval: 5 # Save the model checkpoints every N epochs
+  validateModelInterval: 4 # Run on val set every n validateModelInterval epochs
 
   # Optimizer Params
-  optimAdam:
-    learningRate: 0.0001
-    weightDecay: 0 # Other values: 0.0001
-  optimSgd:
-    learningRate: 1e-6
-    momentum: 0.9
-    weight_decay: 5e-4
-  lrScheduler: "StepLR" # Possible Values: ['', 'StepLR', 'ReduceLROnPlateau'] 
-  lrSchedulerStep:
-    step_size: 7
-    gamma: 0.1
+  optimAdamW:
+    learningRate: 1e-5
+    weightDecay: 0.0001
+  lrScheduler: "OneCycleLR" # Possible Values: ['ReduceLROnPlateau', 'OneCycleLR'] 
   lrSchedulerPlateau:
     factor: 0.8
-    patience: 25
+    patience: 1000
     verbose: True
+  OneCycleLR:
+    div_factor: 25
+    final_div_factor: 100
 
 # eval.py Config - Validation/Testing Inference
 eval:
   # Synthetic datasets with ground truth depths
   # Used as validation set
-  datasetsSynthetic:
-    - images: './data/val/rgb-imgs'
-      depths: './data/val/depth-imgs-rectified'
+  datasetsTestSynthetic:
+      - images: './DataSet/cleargrasp-dataset-test-val/synthetic-test/glass-round-potion-test/rgb-imgs'
+        mask: './DataSet/cleargrasp-dataset-test-val/synthetic-test/glass-round-potion-test/segmentation-masks'
+        depths: './DataSet/cleargrasp-dataset-test-val/synthetic-test/glass-round-potion-test/depth-imgs-rectified'
+      - images: './DataSet/cleargrasp-dataset-test-val/synthetic-test/glass-square-potion-test/rgb-imgs'
+        mask: './DataSet/cleargrasp-dataset-test-val/synthetic-test/glass-square-potion-test/segmentation-masks'
+        depths: './DataSet/cleargrasp-dataset-test-val/synthetic-test/glass-square-potion-test/depth-imgs-rectified'
+      - images: './DataSet/cleargrasp-dataset-test-val/synthetic-test/star-bath-bomb-test/rgb-imgs'
+        mask: './DataSet/cleargrasp-dataset-test-val/synthetic-test/star-bath-bomb-test/segmentation-masks'
+        depths: './DataSet/cleargrasp-dataset-test-val/synthetic-test/star-bath-bomb-test/depth-imgs-rectified'
+      - images: './DataSet/cleargrasp-dataset-test-val/synthetic-test/tree-bath-bomb-test/rgb-imgs'
+        mask: './DataSet/cleargrasp-dataset-test-val/synthetic-test/tree-bath-bomb-test/segmentation-masks'
+        depths: './DataSet/cleargrasp-dataset-test-val/synthetic-test/tree-bath-bomb-test/depth-imgs-rectified'
 
-  # Datasets of real images, no depths available
+  # 2/3 split of Datasets of real images, no complete depths available
   # Used as Test set
-  datasetsReal:
-    # - images: "datasets-transparent/studio_pics_sorted/selected_test/d415"
-    #   depths: "datasets-transparent/studio_pics_sorted/selected_test/d415"
-    # - images: "datasets-transparent/studio_pics_sorted/selected_test/d435"
-    #   depths: "datasets-transparent/studio_pics_sorted/selected_test/d435"
-    # - images: "datasets-transparent/studio_pics_sorted/selected_val/d435"
-    #   depths: "datasets-transparent/studio_pics_sorted/selected_val/d435"
+  datasetsTestReal:
+      - images: './DataSet/cleargrasp-dataset-test-val/real-test/d415'
+        mask: './DataSet/cleargrasp-dataset-test-val/real-test/d415'
+        depths: './DataSet/cleargrasp-dataset-test-val/real-test/d415'
+      - images: './DataSet/cleargrasp-dataset-test-val/real-test/d435'
+        mask: './DataSet/cleargrasp-dataset-test-val/real-test/d415'
+        depths: './DataSet/cleargrasp-dataset-test-val/real-test/d435'
+        
+  datasetNYU:
+      images: './DataSet/nyu_depth_v2/official_splits/test/'
+      depths: './DataSet/nyu_depth_v2/official_splits/test/'
 
+  transDepthDatasetTest: '/gris/gris-f/homelv/ajamili/vc/setGen/output_test/'
  
+
+  
+  # origing checkpoints  
+  # "./models/AdaBin/weights/origin/AdaBins_nyu.pt" "./models/DenseDepth/weights/origin/nyu.h5" "./models/DPT/weights/origin/dpt_hybrid_nyu-2ce69ec7.pt"
+  # "./models/LapDepth/weights/origin/LDRN_NYU_ResNext101_pretrained_data.pkl"
+  # SSIM/SI checkpoints:
+  # "./models/AdaBin/weights/trained/adabin_SSIM.pth" "./models/DenseDepth/weights/trained/densedepth_SSIM.pth" "./models/DPT/weights/trained/dpt_SSIM_imgaug.pth"
+  # "./models/LapDepth/weights/trained/lapdepth_SSIM.pth"
   # Params
-  model: "densedepth" # Possible values: ['densedepth']
-  batchSize: 2
-  imgHeight: 256
-  imgWidth: 256
-  os: 8
-  numWorkers: 1 # Num of workers used in the dataloader
-  pathWeightsFile: "./logs/exp-000/checkpoints/checkpoint-epoch-0000.pth" # Path to the checkpoint to be loaded
-  resultsDir: "./data/results"
+  otherSets:
+    filenames_file_nyu: './DataSet/nyu_depth_v2/nyudepthv2_test_files_with_gt.txt'
+  dataset: 'transDepth' # Possible Values: ['clearGrasp', 'nyu', transDepth] 
+  densedepth:
+    should_validate: False
+    saveImgae: True
+    pathWeightsFile: "./models/DenseDepth/weights/trained/densedepth_SI.pth" # Path to the checkpoint to be loaded
+  adabin:
+    should_validate: False
+    saveImgae: True
+    pathWeightsFile: "./models/AdaBin/weights/trained/adabin_SI.pth" # Path to the checkpoint to be loaded
+    n_bins: 256
+    norm: 'linear'
+  dpt:
+    should_validate: False
+    saveImgae: True
+    pathWeightsFile: "./models/DPT/weights/trained/dpt_SI.pth" # Path to the checkpoint to be loaded
+  lapdepth:
+    should_validate: True
+    saveImgae: True
+    pathWeightsFile: "./models/LapDepth/weights/trained/lapdepth_SI.pth" # Path to the checkpoint to be loaded
+  compareResult: True
+  saveCompareImage: False
+  saveNormedImg: False
+  loadProjektCheckpoints: True # If true, dont load origin checkpoints
+  batchSize: 8
+  min_depth: 0.1
+  max_depth: 4
+  saveEXR: False
+  imgHeight: 512
+  imgWidth: 512
+  numWorkers: 4 # Num of workers used in the dataloader
+  resultsDir: "./logs/results"
 

@@ -1,707 +1,529 @@
 '''
 
-Train the models for depth map estimation of transparent structures
+Training script for depth map estimation of transparent structures.
 
-TODO: DOC
+Note: This file is adapted from ClearGrasp and AdaBins trainig framework.
 
 '''
 
+from utils import framework_train, model_io
+import dataloader
+import dataloader_clearGrasp
+import dataloader_transDepth
+import loss_functions
+from tqdm import tqdm
+from torch.utils.data import DataLoader
+from termcolor import colored
+from torch.utils.tensorboard import SummaryWriter
+from imgaug import augmenters as iaa
+from attrdict import AttrDict
+import torch.nn as nn
+import torch
+import oyaml
 import argparse
 import errno
 import glob
 import io
 import os
-import random
 import shutil
 
-import cv2
-import imgaug as ia
-import numpy as np
-import oyaml
-import torch
-import torch.nn as nn
-from attrdict import AttrDict
-from imgaug import augmenters as iaa
-from torch.utils.tensorboard import SummaryWriter
-from termcolor import colored
-from torch.utils.data import DataLoader
-from torchvision import transforms
-from tqdm import tqdm
+os.environ["CUDA_VISIBLE_DEVICES"] = "4"
+device_ids = [0]
 
-import dataloader
-import model
-import loss_functions
-from utils import utils
 
-###################### Load Config File #############################
-parser = argparse.ArgumentParser(description='Run training of outlines prediction model')
-parser.add_argument('-c', '--configFile', required=True, help='Path to config yaml file', metavar='path/to/config')
-args = parser.parse_args()
+def loadDataSet_with_imaug(config):
+    '''Returns the DataLoader classes for training and validation data sets with respect to specified arguments 
+        in the config yaml file. 
 
-CONFIG_FILE_PATH = args.configFile
-with open(CONFIG_FILE_PATH) as fd:
-    config_yaml = oyaml.load(fd, Loader= oyaml.FullLoader)  # Returns an ordered dict. Used for printing
+        Args:
+            config (dict): The parsed configuration YAML file
 
-config = AttrDict(config_yaml)
-# print(colored('Config being used for training:\n{}\n\n'.format(oyaml.dump(config_yaml)), 'green'))
+        Returns:
+            DataLoader: DataLoader for trainig data set
+            DataLoader: DataLoader for synthetic validation data set
+            DataLoader: DataLoader for real validation data set
+    '''
 
-###################### Logs (TensorBoard)  #############################
-# Create directory to save results
-SUBDIR_RESULT = 'checkpoints'
+    augs_train = iaa.Sequential([
+        # Geometric Augs
+        iaa.Resize({
+            "height": config.train.imgHeight,
+            "width": config.train.imgWidth
+        }, interpolation='nearest'),
+        iaa.Fliplr(0.5),
+        iaa.Flipud(0.5),
+        iaa.Rot90((0, 4)),
 
-results_root_dir = config.train.logsDir
-runs = sorted(glob.glob(os.path.join(results_root_dir, 'exp-*')))
-prev_run_id = int(runs[-1].split('-')[-1]) if runs else 0
-results_dir = os.path.join(results_root_dir, 'exp-{:03d}'.format(prev_run_id))
-if os.path.isdir(os.path.join(results_dir, SUBDIR_RESULT)):
-    NUM_FILES_IN_EMPTY_FOLDER = 0
-    if len(os.listdir(os.path.join(results_dir, SUBDIR_RESULT))) > NUM_FILES_IN_EMPTY_FOLDER:
-        prev_run_id += 1
-        results_dir = os.path.join(results_root_dir, 'exp-{:03d}'.format(prev_run_id))
-        os.makedirs(results_dir)
-else:
-    os.makedirs(results_dir)
+        # Bright Patches
+        iaa.Sometimes(
+            0.1,
+            iaa.blend.BlendAlpha(factor=(0.2, 0.7),
+                            foreground=iaa.blend.BlendAlphaSimplexNoise(foreground=iaa.Multiply((1.5, 3.0), per_channel=False),
+                                                              upscale_method='cubic',
+                                                              iterations=(1, 2)),
+                            name="simplex-blend")),
 
-try:
-    os.makedirs(os.path.join(results_dir, SUBDIR_RESULT))
-except OSError as exc:
-    if exc.errno != errno.EEXIST:
-        raise
-    pass
-
-MODEL_LOG_DIR = results_dir
-CHECKPOINT_DIR = os.path.join(MODEL_LOG_DIR, SUBDIR_RESULT)
-shutil.copy2(CONFIG_FILE_PATH, os.path.join(results_dir, 'config.yaml'))
-print('Saving results to folder: ' + colored('"{}"'.format(results_dir), 'blue'))
-
-# Create a tensorboard object and Write config to tensorboard
-writer = SummaryWriter(MODEL_LOG_DIR, comment='create-graph')
-
-string_out = io.StringIO()
-oyaml.dump(config_yaml, string_out, default_flow_style=False)
-config_str = string_out.getvalue().split('\n')
-string = ''
-for line in config_str:
-    string = string + '    ' + line + '\n\r'
-writer.add_text('Config', string, global_step=None)
-
-###################### DataLoader #############################
-# Train Dataset - Create a dataset object for each dataset in our list, Concatenate datasets, select subset for training
-augs_train = iaa.Sequential([
-    # Geometric Augs
-    iaa.Resize({
-        "height": config.train.imgHeight,
-        "width": config.train.imgWidth
-    }, interpolation='nearest'),
-    # iaa.Fliplr(0.5),
-    # iaa.Flipud(0.5),
-    # iaa.Rot90((0, 4)),
-
-    # Bright Patches
-    iaa.Sometimes(
-        0.1,
-        iaa.blend.Alpha(factor=(0.2, 0.7),
-                        first=iaa.blend.SimplexNoiseAlpha(first=iaa.Multiply((1.5, 3.0), per_channel=False),
-                                                          upscale_method='cubic',
-                                                          iterations=(1, 2)),
-                        name="simplex-blend")),
-
-    # Color Space Mods
-    iaa.Sometimes(
-        0.3,
-        iaa.OneOf([
-            iaa.Add((20, 20), per_channel=0.7, name="add"),
-            iaa.Multiply((1.3, 1.3), per_channel=0.7, name="mul"),
-            iaa.WithColorspace(to_colorspace="HSV",
-                               from_colorspace="RGB",
-                               children=iaa.WithChannels(0, iaa.Add((-200, 200))),
-                               name="hue"),
-            iaa.WithColorspace(to_colorspace="HSV",
-                               from_colorspace="RGB",
-                               children=iaa.WithChannels(1, iaa.Add((-20, 20))),
-                               name="sat"),
-            iaa.ContrastNormalization((0.5, 1.5), per_channel=0.2, name="norm"),
-            iaa.Grayscale(alpha=(0.0, 1.0), name="gray"),
-        ])),
-
-    # Blur and Noise
-    iaa.Sometimes(
-        0.2,
-        iaa.SomeOf((1, None), [
-            iaa.OneOf([iaa.MotionBlur(k=3, name="motion-blur"),
-                       iaa.GaussianBlur(sigma=(0.5, 1.0), name="gaus-blur")]),
+        # Color Space Mods
+        iaa.Sometimes(
+            0.3,
             iaa.OneOf([
-                iaa.AddElementwise((-5, 5), per_channel=0.5, name="add-element"),
-                iaa.MultiplyElementwise((0.95, 1.05), per_channel=0.5, name="mul-element"),
-                iaa.AdditiveGaussianNoise(scale=0.01 * 255, per_channel=0.5, name="guas-noise"),
-                iaa.AdditiveLaplaceNoise(scale=(0, 0.01 * 255), per_channel=True, name="lap-noise"),
-                iaa.Sometimes(1.0, iaa.Dropout(p=(0.003, 0.01), per_channel=0.5, name="dropout")),
-            ]),
-        ],
-                   random_order=True)),
+                iaa.Add((20, 20), per_channel=0.7, name="add"),
+                iaa.Multiply((1.3, 1.3), per_channel=0.7, name="mul"),
+                iaa.WithColorspace(to_colorspace="HSV",
+                                   from_colorspace="RGB",
+                                   children=iaa.WithChannels(
+                                       0, iaa.Add((-200, 200))),
+                                   name="hue"),
+                iaa.WithColorspace(to_colorspace="HSV",
+                                   from_colorspace="RGB",
+                                   children=iaa.WithChannels(
+                                       1, iaa.Add((-20, 20))),
+                                   name="sat"),
+                iaa.contrast.LinearContrast(
+                    (0.5, 1.5), per_channel=0.2, name="norm"),
+                iaa.Grayscale(alpha=(0.0, 1.0), name="gray"),
+            ])),
 
-    # Colored Blocks
-    iaa.Sometimes(0.2, iaa.CoarseDropout(0.02, size_px=(4, 16), per_channel=0.5, name="cdropout")),
-])
-input_only = [
-    "simplex-blend", "add", "mul", "hue", "sat", "norm", "gray", "motion-blur", "gaus-blur", "add-element",
-    "mul-element", "guas-noise", "lap-noise", "dropout", "cdropout"
-]
+        # Blur and Noise
+        iaa.Sometimes(
+            0.2,
+            iaa.SomeOf((1, None), [
+                iaa.OneOf([iaa.MotionBlur(k=3, name="motion-blur"),
+                           iaa.GaussianBlur(sigma=(0.5, 1.0), name="gaus-blur")]),
+                iaa.OneOf([
+                    iaa.AddElementwise(
+                        (-5, 5), per_channel=0.5, name="add-element"),
+                    iaa.MultiplyElementwise(
+                        (0.95, 1.05), per_channel=0.5, name="mul-element"),
+                    iaa.AdditiveGaussianNoise(
+                        scale=0.01 * 255, per_channel=0.5, name="guas-noise"),
+                    iaa.AdditiveLaplaceNoise(
+                        scale=(0, 0.01 * 255), per_channel=True, name="lap-noise"),
+                    iaa.Sometimes(1.0, iaa.Dropout(
+                        p=(0.003, 0.01), per_channel=0.5, name="dropout")),
+                ]),
+            ],
+                random_order=True))
+    ])
 
-db_synthetic_lst = []
-if config.train.datasetsTrain is not None:
-    for dataset in config.train.datasetsTrain:
-        if dataset.images:
-            db_synthetic = dataloader.ClearGraspsDataset(input_dir=dataset.images,
-                                                            depth_dir=dataset.depths,
-                                                            transform=augs_train,
-                                                            input_only=input_only)
-            db_synthetic_lst.append(db_synthetic)
-    db_synthetic = torch.utils.data.ConcatDataset(db_synthetic_lst)
+    # list of imgaug Transform names to be applied only on the imgs.
+    input_only = [
+        "simplex-blend", "add", "mul", "hue", "sat", "norm", "gray", "motion-blur", "gaus-blur", "add-element",
+        "mul-element", "guas-noise", "lap-noise", "dropout", "cdropout"
+    ]
+
+    # trainig data set
+    db_synthetic_lst = []
+    if config.train.datasetsTrain is not None:
+        for dataset in config.train.datasetsTrain:
+            if dataset.images:
+                db_synthetic = dataloader.ClearGraspsDataset(input_dir=dataset.images,
+                                                             depth_dir=dataset.depths,
+                                                             transform=augs_train,
+                                                             input_only=input_only)
+                                                        
+                train_size = int(
+                    config.train.percentageDataForTraining * len(db_synthetic))
+                db_synthetic = torch.utils.data.Subset(db_synthetic, range(train_size))
+                db_synthetic_lst.append(db_synthetic)
+        db_synthetic = torch.utils.data.ConcatDataset(db_synthetic_lst)
+
+    # Validation data set
+    augs_test = iaa.Sequential([
+        iaa.Resize({
+            "height": config.train.imgHeight,
+            "width": config.train.imgWidth
+        }, interpolation='nearest'),
+    ])
+
+    db_val_list_real = []
+    if config.train.datasetsValReal is not None:
+        for dataset in config.train.datasetsValReal:
+            if dataset.images:
+                db = dataloader.ClearGraspsDataset(input_dir=dataset.images,
+                                                   depth_dir=dataset.depths,
+                                                   transform=augs_test,
+                                                   input_only=None,
+                                                   isSynthetic=False)
+
+                train_size = int(
+                    config.train.percentageDataForValidation * len(db))
+                db = torch.utils.data.Subset(db, range(train_size))
+                db_val_list_real.append(db)
+
+    if db_val_list_real:
+        db_val_real = torch.utils.data.ConcatDataset(db_val_list_real)
+
+    db_val_synthetic_list = []
+    if config.train.datasetsValSynthetic is not None:
+        for dataset in config.train.datasetsValSynthetic:
+            if dataset.images:
+                db = dataloader.ClearGraspsDataset(input_dir=dataset.images,
+                                                   depth_dir=dataset.depths,
+                                                   transform=augs_test,
+                                                   input_only=None)
+                train_size = int(
+                    config.train.percentageDataForValidation * len(db))
+                db = torch.utils.data.Subset(db, range(train_size))
+                db_val_synthetic_list.append(db)
+
+    if db_val_synthetic_list:
+        db_val_synthetic = torch.utils.data.ConcatDataset(
+            db_val_synthetic_list)
+
+    # Create dataloaders
+    if db_synthetic_lst:
+        assert (config.train.batchSize <= len(db_synthetic)), \
+            ('batchSize ({}) cannot be more than the ' +
+             'number of images in train dataset: {}').format(config.train.validationBatchSize, len(db_synthetic))
+
+        trainLoader = DataLoader(db_synthetic,
+                                 batch_size=config.train.batchSize,
+                                 shuffle=True,
+                                 num_workers=config.train.numWorkers,
+                                 drop_last=True,
+                                 pin_memory=True)
+
+    if db_val_list_real:
+        assert (config.train.validationBatchSize <= len(db_val_real)), \
+            ('validationBatchSize ({}) cannot be more than the ' +
+             'number of images in validation dataset: {}').format(config.train.validationBatchSize, len(db_val_real))
+
+        realValidationLoader = DataLoader(db_val_real,
+                                          batch_size=config.train.validationBatchSize,
+                                          shuffle=True,
+                                          num_workers=config.train.numWorkers,
+                                          drop_last=False)
+
+    # Create dataloaders
+    if db_val_synthetic_list:
+        assert (config.train.validationBatchSize <= len(db_val_synthetic)), \
+            ('validationBatchSize ({}) cannot be more than the ' +
+             'number of images in validation dataset: {}').format(config.train.validationBatchSize, len(db_val_synthetic))
+
+        syntheticValidationLoader = DataLoader(db_val_synthetic,
+                                               batch_size=config.train.validationBatchSize,
+                                               shuffle=True,
+                                               num_workers=config.train.numWorkers,
+                                               drop_last=False)
+    return trainLoader, syntheticValidationLoader, realValidationLoader
+
+def loadClearGraspDataSet(config):
+    '''Returns the DataLoader classes for training and validation data sets with respect to specified arguments 
+        in the config yaml file. 
+
+        Args:
+            config (dict): The parsed configuration YAML file
+
+        Returns:
+            DataLoader: DataLoader for trainig data set
+            DataLoader: DataLoader for synthetic validation data set
+            DataLoader: DataLoader for real validation data set
+    '''
+
+    # trainig data set
+    db_synthetic_lst = []
+    if config.train.datasetsTrain is not None:
+        for dataset in config.train.datasetsTrain:
+            if dataset.images:
+                db_synthetic = dataloader_clearGrasp.ClearGraspsDataset(input_dir=dataset.images,
+                                                             depth_dir=dataset.depths, 
+                                                             width=config.train.imgWidth,
+                                                             height=config.train.imgHeight)
+                                                        
+                train_size = int(
+                    config.train.percentageDataForTraining * len(db_synthetic))
+                db_synthetic = torch.utils.data.Subset(db_synthetic, range(train_size))
+                db_synthetic_lst.append(db_synthetic)
+        db_synthetic = torch.utils.data.ConcatDataset(db_synthetic_lst)
 
 
-# Validation Dataset
-augs_test = iaa.Sequential([
-    iaa.Resize({
-        "height": config.train.imgHeight,
-        "width": config.train.imgWidth
-    }, interpolation='nearest'),
-])
+    db_val_list_real = []
+    if config.train.datasetsValReal is not None:
+        for dataset in config.train.datasetsValReal:
+            if dataset.images:
+                db = dataloader_clearGrasp.ClearGraspsDataset(input_dir=dataset.images,
+                                                             depth_dir=dataset.depths, 
+                                                             width=config.train.imgWidth,
+                                                             height=config.train.imgHeight,
+                                                             mode='test',
+                                                             isSynthetic=False)
 
-db_val_list = []
-if config.train.datasetsVal is not None:
-    for dataset in config.train.datasetsVal:
-        if dataset.images:
-            db = dataloader.ClearGraspsDataset(input_dir=dataset.images,
-                                                  depth_dir=dataset.depths,
-                                                  transform=augs_test,
-                                                  input_only=None)
-            train_size = int(config.train.percentageDataForValidation * len(db))
-            db = torch.utils.data.Subset(db, range(train_size))
-            db_val_list.append(db)
+                train_size = int(
+                    config.train.percentageDataForValidation * len(db))
+                db = torch.utils.data.Subset(db, range(train_size))
+                db_val_list_real.append(db)
 
+    if db_val_list_real:
+        db_val_real = torch.utils.data.ConcatDataset(db_val_list_real)
 
-if db_val_list:
-    db_val = torch.utils.data.ConcatDataset(db_val_list)
+    db_val_synthetic_list = []
+    if config.train.datasetsValSynthetic is not None:
+        for dataset in config.train.datasetsValSynthetic:
+            if dataset.images:
+                db = dataloader_clearGrasp.ClearGraspsDataset(input_dir=dataset.images,
+                                                             depth_dir=dataset.depths, 
+                                                             width=config.train.imgWidth,
+                                                             height=config.train.imgHeight,
+                                                             mode='test')
+                train_size = int(
+                    config.train.percentageDataForValidation * len(db))
+                db = torch.utils.data.Subset(db, range(train_size))
+                db_val_synthetic_list.append(db)
 
-# Test Dataset - Real
-db_test_list = []
-if config.train.datasetsTestReal is not None:
-    for dataset in config.train.datasetsTestReal:
-        if dataset.images:
-            db = dataloader.ClearGraspsDataset(input_dir=dataset.images,
-                                                  depth_dir=dataset.depths,
-                                                  transform=augs_test,
-                                                  input_only=None)
-            db_test_list.append(db)
-    if db_test_list:
-        db_test = torch.utils.data.ConcatDataset(db_test_list)
+    if db_val_synthetic_list:
+        db_val_synthetic = torch.utils.data.ConcatDataset(
+            db_val_synthetic_list)
 
-# Test Dataset - Synthetic
-db_test_synthetic_list = []
-if config.train.datasetsTestSynthetic is not None:
-    for dataset in config.train.datasetsTestSynthetic:
-        if dataset.images:
-            db = dataloader.ClearGraspsDataset(input_dir=dataset.images,
-                                                  depth_dir=dataset.depths,
-                                                  transform=augs_test,
-                                                  input_only=None)
-            db_test_synthetic_list.append(db)
-    if db_test_synthetic_list:
-        db_test_synthetic = torch.utils.data.ConcatDataset(db_test_synthetic_list)
+    # Create dataloaders
+    if db_synthetic_lst:
+        assert (config.train.batchSize <= len(db_synthetic)), \
+            ('batchSize ({}) cannot be more than the ' +
+             'number of images in train dataset: {}').format(config.train.validationBatchSize, len(db_synthetic))
 
-# Create dataloaders
-if db_val_list:
-    assert (config.train.validationBatchSize <= len(db_val)), \
-        ('validationBatchSize ({}) cannot be more than the ' +
-         'number of images in validation dataset: {}').format(config.train.validationBatchSize, len(db_val))
+        trainLoader = DataLoader(db_synthetic,
+                                 batch_size=config.train.batchSize,
+                                 shuffle=True,
+                                 num_workers=config.train.numWorkers,
+                                 drop_last=True,
+                                 pin_memory=True)
 
-    validationLoader = DataLoader(db_val,
-                                  batch_size=config.train.validationBatchSize,
-                                  shuffle=True,
-                                  num_workers=config.train.numWorkers,
-                                  drop_last=False)
-if db_test_list:
-    assert (config.train.testBatchSize <= len(db_test)), \
-        ('testBatchSize ({}) cannot be more than the ' +
-         'number of images in test dataset: {}').format(config.train.testBatchSize, len(db_test))
+    if db_val_list_real:
+        assert (config.train.validationBatchSize <= len(db_val_real)), \
+            ('validationBatchSize ({}) cannot be more than the ' +
+             'number of images in validation dataset: {}').format(config.train.validationBatchSize, len(db_val_real))
 
-    testLoader = DataLoader(db_test,
-                            batch_size=config.train.testBatchSize,
-                            shuffle=False,
-                            num_workers=config.train.numWorkers,
-                            drop_last=True)
-if db_test_synthetic_list:
-    assert (config.train.testBatchSize <= len(db_test_synthetic)), \
-        ('testBatchSize ({}) cannot be more than the ' +
-         'number of images in test dataset: {}').format(config.train.testBatchSize, len(db_test_synthetic_list))
+        realValidationLoader = DataLoader(db_val_real,
+                                          batch_size=config.train.validationBatchSize,
+                                          shuffle=True,
+                                          num_workers=config.train.numWorkers,
+                                          drop_last=False)
 
-    testSyntheticLoader = DataLoader(db_test_synthetic,
-                                     batch_size=config.train.testBatchSize,
-                                     shuffle=True,
-                                     num_workers=config.train.numWorkers,
-                                     drop_last=True)
+    # Create dataloaders
+    if db_val_synthetic_list:
+        assert (config.train.validationBatchSize <= len(db_val_synthetic)), \
+            ('validationBatchSize ({}) cannot be more than the ' +
+             'number of images in validation dataset: {}').format(config.train.validationBatchSize, len(db_val_synthetic))
 
+        syntheticValidationLoader = DataLoader(db_val_synthetic,
+                                               batch_size=config.train.validationBatchSize,
+                                               shuffle=True,
+                                               num_workers=config.train.numWorkers,
+                                               drop_last=False)
+    return trainLoader, syntheticValidationLoader, realValidationLoader
 
-# Resize Tensor
-def resize_tensor(input_tensor, height, width):
-    augs_depth_resize = iaa.Sequential([iaa.Resize({"height": height, "width": width}, interpolation='nearest')])
-    det_tf = augs_depth_resize.to_deterministic()
-    input_tensor = input_tensor.numpy().transpose(0, 2, 3, 1)
-    resized_array = det_tf.augment_images(input_tensor)
-    resized_array = torch.from_numpy(resized_array.transpose(0, 3, 1, 2))
-    resized_array = resized_array.type(torch.DoubleTensor)
+def loadtransDepthDataSet(config):
+    validationLoader = dataloader_transDepth.TransDepthDataLoader(config.train.transDepthDatasetVal, config.train.batchSize, config.train.numWorkers, 'test').data
 
-    return resized_array
+    trainLoader = dataloader_transDepth.TransDepthDataLoader(config.train.transDepthDatasetTrain, config.train.batchSize, config.train.numWorkers, 'train').data
 
+    return trainLoader, validationLoader 
 
-###################### ModelBuilder #############################
-if config.train.model == 'densedepth':
-    model = model.Model()
-else:
-    raise ValueError(
-        'Invalid model "{}" in config file. Must be one of ["densedepth", ]'
-        .format(config.train.model))
+def train(gpu, config, writer):
+    '''Initializes the model, optimizer, and lr_scheduler specified in config. The model is moved 
+        to provided gpu's. After setup, the training procedur of corresponding model is called.
 
-if config.train.continueTraining:
-    print(colored('Continuing training from checkpoint...Loaded data from checkpoint:', 'green'))
-    if not os.path.isfile(config.train.pathPrevCheckpoint):
-        raise ValueError('Invalid path to the given weights file for transfer learning.\
-                The file {} does not exist'.format(config.train.pathPrevCheckpoint))
+        Args:
+            gpu (list of int): Device IDs of GPUs which are going to be used
+            config (dict): The parsed configuration YAML file
+            writer (SummaryWriter): A Tensorboard SummaryWriter instance
 
-    CHECKPOINT = torch.load(config.train.pathPrevCheckpoint, map_location='cpu')
+        Raises:
+            ValueError: If the given model is not supported
+            ValueError: If the given loss function is not supported
+            ValueError: If the given lr scheduler is not supported
+    '''
 
-    if 'model_state_dict' in CHECKPOINT:
-        # Our weights file with various dicts
-        model.load_state_dict(CHECKPOINT['model_state_dict'])
-    elif 'state_dict' in CHECKPOINT:
-        # Original Author's checkpoint
-        CHECKPOINT['state_dict'].pop('decoder.last_conv.8.weight')
-        CHECKPOINT['state_dict'].pop('decoder.last_conv.8.bias')
-        model.load_state_dict(CHECKPOINT['state_dict'], strict=False)
+    ###################### DataLoader #############################
+    # Train Dataset - Create a dataset object for each dataset in our list, Concatenate datasets, select subset for training
+    if config.train.dataset == 'transDepth':
+        trainLoader, syntheticValidationLoader = loadtransDepthDataSet(config)
+        realValidationLoader = None
     else:
-        # Our old checkpoint containing only model's state_dict()
-        model.load_state_dict(CHECKPOINT)
+        trainLoader, syntheticValidationLoader, realValidationLoader = loadClearGraspDataSet(config)
 
-# Enable Multi-GPU training
-print("Let's use", torch.cuda.device_count(), "GPUs!")
-model = nn.DataParallel(model)
-
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-model = model.to(device)
-
-###################### Setup Optimizer #############################
-if config.train.model == 'densedepth':
-    optimizer = torch.optim.Adam(model.parameters(),
-                                 lr=float(config.train.optimAdam.learningRate),
-                                 weight_decay=float(config.train.optimAdam.weightDecay))
-else:
-    raise ValueError(
-        'Invalid model "{}" in config file for optimizer. Must be one of ["drn", unet", "deeplab_xception", "deeplab_resnet", "refinenet"]'
-        .format(config.train.model))
-
-if config.train.lrScheduler == 'StepLR':
-    lr_scheduler = torch.optim.lr_scheduler.StepLR(optimizer,
-                                                   step_size=config.train.lrSchedulerStep.step_size,
-                                                   gamma=float(config.train.lrSchedulerStep.gamma))
-elif config.train.lrScheduler == 'ReduceLROnPlateau':
-    lr_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer,
-                                                              factor=float(config.train.lrSchedulerPlateau.factor),
-                                                              patience=config.train.lrSchedulerPlateau.patience,
-                                                              verbose=True)
-else:
-    raise ValueError(
-        "Invalid Scheduler from config file: '{}'. Valid values are ['', 'StepLR', 'ReduceLROnPlateau']".format(
-            config.train.lrScheduler))
-
-# Continue Training from prev checkpoint if required
-if config.train.continueTraining and config.train.initOptimizerFromCheckpoint:
-    if 'optimizer_state_dict' in CHECKPOINT:
-        optimizer.load_state_dict(CHECKPOINT['optimizer_state_dict'])
+    ###################### ModelBuilder #############################
+    if config.train.model == 'densedepth':
+        from models.DenseDepth import DenseDepth
+        model = DenseDepth()
+    elif config.train.model == 'adabin':
+        from models.AdaBin import UnetAdaptiveBins
+        model = UnetAdaptiveBins.build(n_bins=config.train.adabin.n_bins, min_val=config.train.adabin.min_depth,
+                                       max_val=config.train.adabin.max_depth, norm=config.train.adabin.norm)
+    elif config.train.model == 'dpt':
+        from models.DPT.models import DPTDepthModel
+        model = DPTDepthModel(
+            scale=0.000305,
+            shift=0.1378,
+            invert=True,
+            backbone="vitb_rn50_384",
+            non_negative=True,
+            enable_attention_hooks=False,
+        ) 
+    elif config.train.model == 'lapdepth':
+        from models.LapDepth import LDRN
+        model = LDRN({
+                'lv6': False,
+                'encoder': 'ResNext101',
+                'norm': 'BN',
+                'act': 'ReLU',
+                'max_depth': config.train.adabin.max_depth,
+            })
     else:
-        print(
-            colored(
-                'WARNING: Could not load optimizer state from checkpoint as checkpoint does not contain ' +
-                '"optimizer_state_dict". Continuing without loading optimizer state. ', 'red'))
+        raise ValueError(
+            'Invalid model "{}" in config file. Must be one of ["densedepth", "adabin", "dpt"]'
+            .format(config.train.model))
 
-### Select Loss Func ###
-if config.train.lossFunc == 'cosine':
-    criterion = loss_functions.loss_fn_cosine
-elif config.train.lossFunc == 'radians':
-    criterion = loss_functions.loss_fn_radians
-else:
-    raise ValueError("Invalid lossFunc from config file. Can only be ['cosine', 'radians']. " +
-                     "Value passed is: {}".format(config.train.lossFunc))
+    if config.train.continueTraining:
+        if config.train.loadProjektCheckpoints:
+            CHECKPOINT, model = model_io.load_checkpoint(config.train.pathPrevCheckpoint, model)
+        else:
+            model = model_io.load_origin_Checkpoint(config.train.pathPrevCheckpoint, config.train.model, model)
 
-###################### Train Model #############################
-# Set total iter_num (number of batches seen by model, used for logging)
-total_iter_num = 0
-START_EPOCH = 0
-END_EPOCH = config.train.numEpochs
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-if (config.train.continueTraining and config.train.loadEpochNumberFromCheckpoint):
-    if 'model_state_dict' in CHECKPOINT:
-        # TODO: remove this second check for 'model_state_dict' soon. Kept for ensuring backcompatibility
+    # Enable Multi-GPU training
+    print("Let's use", torch.cuda.device_count(), "GPUs!")
+    model = nn.DataParallel(model, gpu)
+    model = model.to(device)
+
+    ###################### Setup Optimizer #############################
+    optimizer = torch.optim.AdamW(model.parameters(),
+                                  lr=float(
+                                      config.train.optimAdamW.learningRate),
+                                  weight_decay=float(config.train.optimAdamW.weightDecay))
+
+    # Continue Training from prev checkpoint if required
+    if config.train.continueTraining and config.train.initOptimizerFromCheckpoint:
+        if 'optimizer_state_dict' in CHECKPOINT:
+            optimizer.load_state_dict(CHECKPOINT['optimizer_state_dict'])
+        else:
+            print(
+                colored(
+                    'WARNING: Could not load optimizer state from checkpoint as checkpoint does not contain ' +
+                    '"optimizer_state_dict". Continuing without loading optimizer state. ', 'red'))
+
+
+    if config.train.lossFunc == 'SSIM':    
+        criterion = loss_functions.ssim
+    elif config.train.lossFunc == 'SILog':
+        criterion = loss_functions.SILogLoss()
+    else:
+        raise ValueError(
+            "Invalid Scheduler from config file: '{}'. Valid values are ['SSIM','SILog']".format(
+                config.train.lossFunc))
+    
+
+    if config.train.lrScheduler == 'ReduceLROnPlateau':
+        lr_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer,
+                                                                  factor=float(
+                                                                      config.train.lrSchedulerPlateau.factor),
+                                                                  patience=config.train.lrSchedulerPlateau.patience,
+                                                                  verbose=True)
+    elif config.train.lrScheduler == 'OneCycleLR':
+        lr_scheduler = torch.optim.lr_scheduler.OneCycleLR(optimizer, float(config.train.optimAdamW.learningRate),
+                                                           epochs=config.train.numEpochs, steps_per_epoch=len(
+                                                               trainLoader),
+                                                           cycle_momentum=True,
+                                                           base_momentum=0.85, max_momentum=0.95,
+                                                           div_factor=config.train.OneCycleLR.div_factor,
+                                                           final_div_factor=config.train.OneCycleLR.final_div_factor)
+    else:
+        raise ValueError(
+            "Invalid Scheduler from config file: '{}'. Valid values are ['ReduceLROnPlateau, 'OneCycleLR']".format(
+                config.train.lrScheduler))
+
+    ###################### Train Model #############################
+    # Set total iter_num (number of batches seen by model, used for logging)
+    total_iter_num = 0
+    START_EPOCH = 0
+    END_EPOCH = config.train.numEpochs
+
+    if (config.train.continueTraining and config.train.loadEpochNumberFromCheckpoint):
         total_iter_num = CHECKPOINT['total_iter_num'] + 1
         START_EPOCH = CHECKPOINT['epoch'] + 1
         END_EPOCH = CHECKPOINT['epoch'] + config.train.numEpochs
+        if config.train.lrScheduler == 'OneCycleLR':
+            lr_scheduler.step(START_EPOCH)
+    
+    if config.train.model == 'densedepth':
+        framework_train.trainDenseDepth(writer, device, model, trainLoader, syntheticValidationLoader, realValidationLoader, optimizer,criterion,  lr_scheduler, START_EPOCH,
+                                  END_EPOCH, total_iter_num, config.train.validateModelInterval, CHECKPOINT_DIR, config_yaml)
+    elif config.train.model == 'adabin':
+        framework_train.trainAdaBin(writer, device, model, trainLoader, syntheticValidationLoader, realValidationLoader, optimizer,criterion, lr_scheduler , START_EPOCH,
+                              END_EPOCH, total_iter_num, config.train.validateModelInterval, CHECKPOINT_DIR, config_yaml)
+    elif config.train.model == 'dpt':
+        framework_train.trainDPT(writer, device, model, trainLoader, syntheticValidationLoader, realValidationLoader, optimizer,criterion,  lr_scheduler, START_EPOCH,
+                                  END_EPOCH, total_iter_num, config.train.validateModelInterval, CHECKPOINT_DIR, config_yaml)
+    elif config.train.model == 'lapdepth':
+        framework_train.trainLapDepth(writer, device, model, trainLoader, syntheticValidationLoader, realValidationLoader, optimizer,criterion, lr_scheduler , START_EPOCH,
+                              END_EPOCH, total_iter_num, config.train.validateModelInterval, CHECKPOINT_DIR, config_yaml)
     else:
-        print(
-            colored(
-                'Could not load epoch and total iter nums from checkpoint, they do not exist in checkpoint.\
-                       Starting from epoch num 0', 'red'))
+        raise ValueError(
+            'Invalid model "{}" in config file. Must be one of ["densedepth", "adabin", "dpt"]'
+            .format(config.train.model))
 
-for epoch in range(START_EPOCH, END_EPOCH):
-    print('\n\nEpoch {}/{}'.format(epoch, END_EPOCH - 1))
-    print('-' * 30)
 
-    # Log the current Epoch Number
-    writer.add_scalar('data/Epoch Number', epoch, total_iter_num)
+if __name__ == '__main__':
 
-    ###################### Training Cycle #############################
-    print('Train:')
-    print('=' * 10)
+    ###################### Load Config File #############################
+    parser = argparse.ArgumentParser(
+        description='Run training of outlines prediction model')
+    parser.add_argument('-c', '--configFile', required=True,
+                        help='Path to config yaml file', metavar='path/to/config')
+    args = parser.parse_args()
 
-    
-    db_train_list = []
-    if config.train.datasetsTrain is not None:
-        if config.train.datasetsTrain[0].images:
-            train_size_synthetic = int(config.train.percentageDataForTraining * len(db_synthetic))
-            db, _ = torch.utils.data.random_split(db_synthetic,
-                                                  (train_size_synthetic, len(db_synthetic) - train_size_synthetic))
-            db_train_list.append(db)
-    
-    db_train = torch.utils.data.ConcatDataset(db_train_list)
-    trainLoader = DataLoader(db_train,
-                             batch_size=config.train.batchSize,
-                             shuffle=True,
-                             num_workers=config.train.numWorkers,
-                             drop_last=True,
-                             pin_memory=True)
+    CONFIG_FILE_PATH = args.configFile
+    with open(CONFIG_FILE_PATH) as fd:
+        # Returns an ordered dict. Used for printing
+        config_yaml = oyaml.load(fd, Loader=oyaml.FullLoader)
 
-    model.train()
+    config = AttrDict(config_yaml)
+    # print(colored('Config being used for training:\n{}\n\n'.format(oyaml.dump(config_yaml)), 'green'))
 
-    running_loss = 0.0
-    running_mean = 0
-    running_median = 0
-    for iter_num, batch in enumerate(tqdm(trainLoader)):
-        total_iter_num += 1
-        
-        # Get data
-        inputs, depths = batch
+    ###################### Logs (TensorBoard)  #############################
+    # Create directory to save results
+    SUBDIR_RESULT = 'checkpoints'
 
-        input_norm = inputs / 255 # # Scale from range [0, 255] to [0.0, 1.0]     
+    results_root_dir = config.train.logsDir
+    runs = sorted(glob.glob(os.path.join(results_root_dir, 'exp-*')))
+    prev_run_id = int(runs[-1].split('-')[-1]) if runs else 0
+    results_dir = os.path.join(
+        results_root_dir, 'exp-{:03d}'.format(prev_run_id))
+    if os.path.isdir(os.path.join(results_dir, SUBDIR_RESULT)):
+        NUM_FILES_IN_EMPTY_FOLDER = 0
+        if len(os.listdir(os.path.join(results_dir, SUBDIR_RESULT))) > NUM_FILES_IN_EMPTY_FOLDER:
+            prev_run_id += 1
+            results_dir = os.path.join(
+                results_root_dir, 'exp-{:03d}'.format(prev_run_id))
+            os.makedirs(results_dir)
+    else:
+        os.makedirs(results_dir)
 
-        if config.train.model == 'densedepth':
-            depths_resized = resize_tensor(depths, int(depths.shape[2] / 2), int(depths.shape[3] / 2))
-            depths_resized = depths_resized.to(device).double()
+    try:
+        os.makedirs(os.path.join(results_dir, SUBDIR_RESULT))
+    except OSError as exc:
+        if exc.errno != errno.EEXIST:
+            raise
+        pass
 
-        input_norm = input_norm.to(device)
-        depths = depths.to(device)
+    MODEL_LOG_DIR = results_dir
+    CHECKPOINT_DIR = os.path.join(MODEL_LOG_DIR, SUBDIR_RESULT)
+    shutil.copy2(CONFIG_FILE_PATH, os.path.join(results_dir, 'config.yaml'))
+    print('Saving results to folder: ' +
+          colored('"{}"'.format(results_dir), 'blue'))
 
-        # Get Model Graph
-        if epoch == 0 and iter_num == 0:
-            writer.add_graph(model, inputs, False)
+    # Create a tensorboard object and Write config to tensorboard
+    writer = SummaryWriter(MODEL_LOG_DIR, comment='create-graph')
 
-        # Forward + Backward Prop
-        optimizer.zero_grad()
-        torch.set_grad_enabled(True)
-        model_output = model(input_norm).float()
+    string_out = io.StringIO()
+    oyaml.dump(config_yaml, string_out, default_flow_style=False)
+    config_str = string_out.getvalue().split('\n')
+    string = ''
+    for line in config_str:
+        string = string + '    ' + line + '\n\r'
+    writer.add_text('Config', string, global_step=None)
 
-        if config.train.model == 'densedepth':
-            loss = criterion(model_output, depths_resized, reduction='sum')
-            loss /= config.train.batchSize
-        
-        loss.backward()
-        optimizer.step()
-        
+    train(device_ids, config, writer)
 
-        # Update Learning Rate Scheduler
-        if config.train.lrScheduler == 'StepLR':
-            lr_scheduler.step()
-        elif config.train.lrScheduler == 'ReduceLROnPlateau':
-            lr_scheduler.step(epoch_loss)
-        
-        model_output = model_output.detach().cpu()
-        depths = depths.detach().cpu()
-
-        loss_deg_mean, loss_deg_median, percentage_1, percentage_2, percentage_3 = loss_functions.metric_calculator_batch(
-            model_output, depths_resized)
-        running_mean += loss_deg_mean.item()
-        running_median += loss_deg_median.item()
-
-        # statistics
-        running_loss += loss.item()
-        writer.add_scalar('data/Train BatchWise Loss', loss.item(), total_iter_num)
-        writer.add_scalar('data/Train Mean Error (deg)', loss_deg_mean.item(), total_iter_num)
-        writer.add_scalar('data/Train Median Error (deg)', loss_deg_median.item(), total_iter_num)
-
-        # Log 10 images every N iters
-        if (iter_num % config.train.saveImageIntervalIter) == 0:
-            if config.train.model == 'densedepth':
-                output = resize_tensor(model_output, int(model_output.shape[2] * 2),
-                                       int(model_output.shape[3] * 2))
-            
-            #print("inputs.shape, output.shape, depths.shape", inputs.shape, output.shape, depths.shape)
-            grid_image, grid_dephts = utils.create_grid_image(inputs.detach(),
-                                             output.float(),
-                                             depths.detach(),
-                                             max_num_images_to_save=16)                              
-            writer.add_image('Train-input', grid_image, total_iter_num)
-            writer.add_image('Train-res', grid_dephts, total_iter_num)
-
-    # Log Epoch Loss
-    num_samples = (len(trainLoader))
-    epoch_loss = running_loss / num_samples
-    writer.add_scalar('data/Train Epoch Loss', epoch_loss, total_iter_num)
-    print('Train Epoch Loss: {:.4f}'.format(epoch_loss))
-    epoch_mean = running_mean / num_samples
-    epoch_median = running_median / num_samples
-    print('Train Epoch Mean Error (deg): {:.4f}'.format(epoch_mean))
-    print('Train Epoch Median Error (deg): {:.4f}'.format(epoch_median))
-
-    # Log Current Learning Rate
-    # TODO: NOTE: The lr of adam is not directly accessible. Adam creates a loss for every parameter in model.
-    #    The value read here will only reflect the initial lr value.
-    current_learning_rate = optimizer.param_groups[0]['lr']
-    writer.add_scalar('Learning Rate', current_learning_rate, total_iter_num)
-
-    # Log 10 images every N epochs
-    if (epoch % config.train.saveImageInterval) == 0:
-        if config.train.model == 'densedepth':
-            output = resize_tensor(model_output.detach().cpu(), int(model_output.shape[2] * 2),
-                                   int(model_output.shape[3] * 2))
-        #print("inputs.shape, output.shape, depths.shape", inputs.shape, output.shape, depths.shape)
-        grid_image, grid_dephts = utils.create_grid_image(inputs.detach(),
-                                             output.float(),
-                                             depths.detach(),
-                                             max_num_images_to_save=16)
-        writer.add_image('Train-input', grid_image, total_iter_num)
-        writer.add_image('Train-res', grid_dephts, total_iter_num)
-
-    # Save the model checkpoint every N epochs
-    if (epoch % config.train.saveModelInterval) == 0:
-        filename = os.path.join(CHECKPOINT_DIR, 'checkpoint-epoch-{:04d}.pth'.format(epoch))
-        if torch.cuda.device_count() > 1:
-            model_params = model.module.state_dict()  # Saving nn.DataParallel model
-        else:
-            model_params = model.state_dict()
-        
-        #for param_tensor in model_params:
-        #    print(param_tensor, "\t", model.state_dict()[param_tensor].size())
-        torch.save(
-            {
-                'model_state_dict': model_params,
-                'optimizer_state_dict': optimizer.state_dict(),
-                'epoch': epoch,
-                'total_iter_num': total_iter_num,
-                'epoch_loss': epoch_loss,
-                'config': config_yaml
-            }, filename)
-
-    ###################### Validation Cycle #############################
-    if db_val_list:
-        print('\nValidation:')
-        print('=' * 10)
-
-        model.eval()
-
-        running_loss = 0.0
-        running_mean = 0
-        running_median = 0
-        for iter_num, sample_batched in enumerate(tqdm(validationLoader)):
-            inputs, depths = sample_batched
-
-            input_norm = inputs / 255 # # Scale from range [0, 255] to [0.0, 1.0]     
-
-            # Forward pass of the mini-batch
-            if config.train.model == 'densedepth':
-                depths_resized = resize_tensor(depths, int(depths.shape[2] / 2), int(depths.shape[3] / 2))
-                depths_resized = depths_resized.to(device).double()
-            
-            input_norm = input_norm.to(device)
-            depths = depths.to(device)
-
-            with torch.no_grad():
-                model_output = model(input_norm).float()
-
-            if config.train.model == 'densedepth':
-                loss = criterion(model_output, depths_resized, reduction='sum')
-                loss /= config.train.batchSize
-            
-            running_loss += loss.item()
-
-            loss_deg_mean, loss_deg_median, percentage_1, percentage_2, percentage_3 = loss_functions.metric_calculator_batch(
-                model_output, depths_resized)
-            running_mean += loss_deg_mean.item()
-            running_median += loss_deg_median.item()
-
-        # Log Epoch Loss
-        num_samples = (len(validationLoader))
-        epoch_loss = running_loss / num_samples
-        writer.add_scalar('data/Validation Epoch Loss', epoch_loss, total_iter_num)
-        print('Validation Epoch Loss: {:.4f}'.format(epoch_loss))
-        epoch_mean = running_mean / num_samples
-        epoch_median = running_median / num_samples
-        print('Val Epoch Mean: {:.4f}'.format(epoch_mean))
-        print('Val Epoch Median: {:.4f}'.format(epoch_median))
-        writer.add_scalar('data/Val Epoch Mean Error (deg)', epoch_mean, total_iter_num)
-        writer.add_scalar('data/Val Epoch Median Error (deg)', epoch_median, total_iter_num)
-
-        # Log 10 images every N epochs
-        if (epoch % config.train.saveImageInterval) == 0:
-            if config.train.model == 'densedepth':
-                output = resize_tensor(model_output.detach().cpu(), int(model_output.shape[2] * 2),
-                                       int(model_output.shape[3] * 2))
-            
-            #print("inputs.shape, output.shape, depths.shape", inputs.shape, output.shape, depths.shape)
-
-            grid_image, grid_dephts = utils.create_grid_image(inputs.detach(),
-                                             output.float(),
-                                             depths.detach().cpu(),
-                                             max_num_images_to_save=16) 
-            writer.add_image('Validation-input', grid_image, total_iter_num)
-            writer.add_image('Validation-res', grid_dephts, total_iter_num)
-
-    ###################### Test Cycle - Real #############################
-    if db_test_list:
-        print('\nTesting:')
-        print('=' * 10)
-
-        model.eval()
-
-        running_mean = 0
-        running_median = 0
-        running_d1 = 0
-        img_tensor_list = []
-        output_tensor_list = []
-        depth_tensor_list = []
-        for iter_num, sample_batched in enumerate(tqdm(testLoader)):
-            inputs, depths = sample_batched
-
-            input_norm = inputs / 255 # # Scale from range [0, 255] to [0.0, 1.0]   
-
-            # Forward pass of the mini-batch
-            if config.train.model == 'densedepth':
-                depths_resized = resize_tensor(depths, int(depths.shape[2] / 2), int(depths.shape[3] / 2))
-                depths_resized = depths_resized.to(device).double()
-        
-            input_norm = input_norm.to(device)
-            #depths = depths.to(device)
-
-            with torch.no_grad():
-                model_output = model(input_norm)
-
-            
-            if config.train.model == 'densedepth':
-                model_output_resized = resize_tensor(model_output, int(model_output.shape[2] * 2),
-                                       int(model_output.shape[3] * 2))
-
-            # Save model_output images, one at a time, to results
-            img_tensor = inputs.detach().cpu()
-            output_tensor = model_output_resized.detach().cpu()
-            depth_tensor = depths.detach()
-
-            img_tensor_list.append(img_tensor)
-            output_tensor_list.append(output_tensor)
-            depth_tensor_list.append(depth_tensor)
-            print("depths.shape, model_output.shape, depths_resized ", depths.shape, model_output.shape, depths_resized.shape)
-            for iii, sample_batched in enumerate(zip(img_tensor, model_output.detach().cpu(), depths_resized)):
-                img, output, depth = sample_batched
-                # Calc metrics
-                loss_deg_mean, loss_deg_median, percentage_1, _, _, _ = loss_functions.metric_calculator(output,
-                                                                                                         depth)
-                                                                                                    
-                running_mean += loss_deg_mean.item()
-                running_median += loss_deg_median.item()
-                running_d1 += percentage_1.item()
-
-            # statistics
-            running_loss += loss.item()
-            writer.add_scalar('data/Test Real Mean Error (deg)', loss_deg_mean.item(), total_iter_num)
-            writer.add_scalar('data/Test Real Median Error (deg)', loss_deg_median.item(), total_iter_num)
-
-        # Log Epoch Loss
-        num_samples = len(testLoader.dataset)
-        epoch_mean = running_mean / num_samples
-        epoch_median = running_median / num_samples
-        epoch_d1 = running_d1 / num_samples
-        print('Test Real Epoch Mean: {:.4f}'.format(epoch_mean))
-        print('Test Real Epoch Median: {:.4f}'.format(epoch_median))
-        writer.add_scalar('data/Test Real Epoch Mean Error (deg)', epoch_mean, total_iter_num)
-        writer.add_scalar('data/Test Real Epoch Median Error (deg)', epoch_median, total_iter_num)
-        writer.add_scalar('data/Test Real Epoch d1 Error (deg)', epoch_d1, total_iter_num)
-
-        # Log 30 images every N epochs
-        if (epoch % config.train.saveImageInterval) == 0:
-            grid_image, grid_dephts = utils.create_grid_image(torch.cat(img_tensor_list, dim=0),
-                                                 torch.cat(output_tensor_list, dim=0),
-                                                 torch.cat(depth_tensor_list, dim=0),
-                                                 max_num_images_to_save=200)
-            writer.add_image('Test-Real-input', grid_image, total_iter_num)
-            writer.add_image('Test-Real-res', grid_dephts, total_iter_num)
-            
-            
-
-    ###################### Test Cycle - Synthetic #############################
-    if db_test_synthetic_list:
-        print('\nTest Synthetic:')
-        print('=' * 10)
-
-        model.eval()
-
-        running_loss = 0.0
-        running_mean = 0
-        running_median = 0
-        for iter_num, sample_batched in enumerate(tqdm(testSyntheticLoader)):
-            inputs, depths = sample_batched
-
-            input_norm = inputs / 255 # # Scale from range [0, 255] to [0.0, 1.0]   
-
-            # Forward pass of the mini-batch
-            if config.train.model == 'densedepth':
-                depths_resized = resize_tensor(depths, int(depths.shape[2] / 2), int(depths.shape[3] / 2))
-                depths_resized = depths_resized.to(device).double()
-            
-            input_norm = input_norm.to(device)
-            #depths = depths.to(device)
-
-            with torch.no_grad():
-                model_output = model(input_norm)
-
-            if config.train.model == 'densedepth':
-                loss = criterion(model_output, depths_resized, reduction='sum')
-                loss /= config.train.batchSize
-            
-            running_loss += loss.item()
-
-            loss_deg_mean, loss_deg_median, percentage_1, percentage_2, percentage_3 = loss_functions.metric_calculator_batch(
-                model_output, depths_resized)
-            running_mean += loss_deg_mean.item()
-            running_median += loss_deg_median.item()
-
-        # Log Epoch Loss
-        num_samples = (len(testSyntheticLoader))
-        epoch_loss = running_loss / num_samples
-        writer.add_scalar('data/Test Synthetic Epoch Loss', epoch_loss, total_iter_num)
-        print('\Test Synthetic Epoch Loss: {:.4f}'.format(epoch_loss))
-        epoch_mean = running_mean / num_samples
-        epoch_median = running_median / num_samples
-        print('Test Synthetic Epoch Mean: {:.4f}'.format(epoch_mean))
-        print('Test Synthetic Epoch Median: {:.4f}'.format(epoch_median))
-        writer.add_scalar('data/Test Synthetic Epoch Mean Error (deg)', epoch_mean, total_iter_num)
-        writer.add_scalar('data/Test Synthetic Epoch Median Error (deg)', epoch_median, total_iter_num)
-
-        # Log 30 images every N epochs
-        if (epoch % config.train.saveImageInterval) == 0:
-            if config.train.model == 'densedepth':
-                output = resize_tensor(model_output.detach().cpu(), int(model_output.shape[2] * 2),
-                                       int(model_output.shape[3] * 2))
-            grid_image, grid_dephts = utils.create_grid_image(inputs.detach(),
-                                             output.float(),
-                                             depths.detach(),
-                                             max_num_images_to_save=16)
-            writer.add_image('Test Synthetic-input', grid_image, total_iter_num)
-            writer.add_image('Test Synthetic-res', grid_dephts, total_iter_num)
-
-writer.close()
+    writer.close()
