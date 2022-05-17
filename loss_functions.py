@@ -107,22 +107,12 @@ def compute_errors(gt, pred, should_masked=True, dataset="clearGrasp", masks=Non
             mask[45:471, 41:601] = 0
         else:
             mask = (masks == 0)
-            #_label = np.zeros(masks.shape, dtype=np.uint8)
-            #_label[masks==1] = 1
-            #print(_label.shape, pred.shape, gt.shape)
-            #gt = gt * _label
-            #pred = pred * _label
-            #gt = gt.flatten()
-            #pred = pred.flatten()
-            #_label = _label.flatten()
-            ##print(_label.shape, pred.shape, gt.shape)
-            #m = _label == 1
-            #gt = gt[m]
-            #pred = pred[m]
         
-        gt = np.ma.masked_array(gt, mask=mask)
-        pred = np.ma.masked_array(pred, mask=mask)
-    
+        gt = np.ma.masked_array(gt, mask=mask).compressed()
+        pred = np.ma.masked_array(pred, mask=mask).compressed()
+        if gt.size == 0:
+            return dict(a1=0, a2=0, a3=0, abs_rel=0, rmse=0, log_10=0, rmse_log=0,
+                silog=0, sq_rel=0)
     else:
         gt = gt.numpy()
         pred = pred.numpy()
