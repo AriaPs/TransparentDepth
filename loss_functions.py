@@ -86,7 +86,7 @@ def ssim(model_output, gt_vec, interpolate=True):
 
 
 
-def compute_errors(gt, pred, should_masked=True, dataset="clearGrasp", masks=None,):
+def compute_errors(gt, pred, should_masked=True, dataset="clearGrasp", masks=None, maskOpaques=True):
     '''Returns a dictionary containig the result of all evaluation metric.
 
         Args:
@@ -106,7 +106,10 @@ def compute_errors(gt, pred, should_masked=True, dataset="clearGrasp", masks=Non
             mask = (gt <= 0)
             mask[45:471, 41:601] = 0
         else:
-            mask = (masks == 0)
+            if maskOpaques:
+                mask = (masks == 0)
+            else:
+                mask = (masks == 1)
         
         gt = np.ma.masked_array(gt, mask=mask).compressed()
         pred = np.ma.masked_array(pred, mask=mask).compressed()

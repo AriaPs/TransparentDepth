@@ -66,18 +66,22 @@ def validateAll(model_adabin, model_densedepth, model_dpt, model_lapdepth, devic
         running_loss_adabin = 0.0
         metric_adabin = createMetricDict()
         metric_adabin_masked = createMetricDict()
+        metric_adabin_masked_opaque = createMetricDict()
 
         running_loss_densedepth = 0.0
         metric_densedepth = createMetricDict()
         metric_densedepth_masked = createMetricDict()
+        metric_densedepth_masked_opaque = createMetricDict()
 
         running_loss_dpt = 0.0
         metric_dpt = createMetricDict()
         metric_dpt_masked = createMetricDict()
+        metric_dpt_masked_opaque = createMetricDict()
 
         running_loss_lapdepth = 0.0
         metric_lapdepth = createMetricDict()
         metric_lapdepth_masked = createMetricDict()
+        metric_lapdepth_masked_opaque = createMetricDict()
 
         testLoader = dataloaders_dict[key]
         for ii, sample_batched in enumerate(tqdm(testLoader)):
@@ -143,22 +147,35 @@ def validateAll(model_adabin, model_densedepth, model_dpt, model_lapdepth, devic
                 metric_dpt_masked, batch_metric_dpt_masked = update_metric(metric_dpt_masked, output_dpt, gt, config.eval.dataset, mask=mask)
                 metric_lapdepth_masked, batch_metric_lapdepth_masked = update_metric(metric_lapdepth_masked, output_lapdepth, gt, config.eval.dataset, mask=mask)
 
+                metric_adabin_masked_opaque, batch_metric_adabin_masked_opaque = update_metric(metric_adabin_masked_opaque, output_adabin, gt, config.eval.dataset, mask=mask, maskOpaques=False)
+                metric_densedepth_masked_opaque, batch_metric_densedepth_masked_opaque = update_metric(metric_densedepth_masked_opaque, output_densedepth, gt, config.eval.dataset, mask=mask, maskOpaques=False)
+                metric_dpt_masked_opaque, batch_metric_dpt_masked_opaque = update_metric(metric_dpt_masked_opaque, output_dpt, gt, config.eval.dataset, mask=mask, maskOpaques=False)
+                metric_lapdepth_masked_opaque, batch_metric_lapdepth_masked_opaque = update_metric(metric_lapdepth_masked_opaque, output_lapdepth, gt, config.eval.dataset, mask=mask, maskOpaques=False)
+
                 # Write the data into a csv file
                 write_csv_row("Adabin", config.eval.batchSize, batch_metric_adabin,
                               csv_dir, field_names, csv_filename, ii, iii)
-                write_csv_row("Adabin masked", config.eval.batchSize, batch_metric_adabin_masked,
+                write_csv_row("Adabin masked: Trans", config.eval.batchSize, batch_metric_adabin_masked,
+                              csv_dir, field_names, csv_filename, ii, iii)
+                write_csv_row("Adabin masked: Opaque", config.eval.batchSize, batch_metric_adabin_masked_opaque,
                               csv_dir, field_names, csv_filename, ii, iii)
                 write_csv_row("DenseDepth", config.eval.batchSize, batch_metric_densedepth,
                               csv_dir, field_names, csv_filename, ii, iii)
-                write_csv_row("DenseDepth masked", config.eval.batchSize, batch_metric_densedepth_masked,
+                write_csv_row("DenseDepth masked: Trans", config.eval.batchSize, batch_metric_densedepth_masked,
+                              csv_dir, field_names, csv_filename, ii, iii)
+                write_csv_row("DenseDepth masked: Opaue", config.eval.batchSize, batch_metric_densedepth_masked_opaque,
                               csv_dir, field_names, csv_filename, ii, iii)
                 write_csv_row("DPT", config.eval.batchSize, batch_metric_dpt,
                               csv_dir, field_names, csv_filename, ii, iii)
-                write_csv_row("DPT masked", config.eval.batchSize, batch_metric_dpt_masked,
+                write_csv_row("DPT masked: Trans", config.eval.batchSize, batch_metric_dpt_masked,
+                              csv_dir, field_names, csv_filename, ii, iii)
+                write_csv_row("DPT masked: Opaque", config.eval.batchSize, batch_metric_dpt_masked_opaque,
                               csv_dir, field_names, csv_filename, ii, iii)
                 write_csv_row("LapDepth", config.eval.batchSize, batch_metric_lapdepth,
                               csv_dir, field_names, csv_filename, ii, iii)
-                write_csv_row("LapDepth masked", config.eval.batchSize, batch_metric_lapdepth_masked,
+                write_csv_row("LapDepth masked: Trans", config.eval.batchSize, batch_metric_lapdepth_masked,
+                              csv_dir, field_names, csv_filename, ii, iii)
+                write_csv_row("LapDepth masked: Opaque", config.eval.batchSize, batch_metric_lapdepth_masked_opaque,
                               csv_dir, field_names, csv_filename, ii, iii)
 
                 if config.eval.saveCompareImage:
@@ -184,10 +201,15 @@ def validateAll(model_adabin, model_densedepth, model_dpt, model_lapdepth, devic
         print_means(metric_dpt, num_images, "DPT", csv_dir, csv_filename, field_names)
         print_means(metric_lapdepth, num_images, "LapDepth", csv_dir, csv_filename, field_names)
 
-        print_means(metric_adabin_masked, num_images, "Adabin masked", csv_dir, csv_filename, field_names, True)
-        print_means(metric_densedepth_masked, num_images, "DenseDepth masked", csv_dir, csv_filename, field_names, True)
-        print_means(metric_dpt_masked, num_images, "DPT masked", csv_dir, csv_filename, field_names, True)
-        print_means(metric_lapdepth_masked, num_images, "LapDepth masked", csv_dir, csv_filename, field_names,True)
+        print_means(metric_adabin_masked, num_images, "Adabin masked: Trans", csv_dir, csv_filename, field_names)
+        print_means(metric_densedepth_masked, num_images, "DenseDepth masked: Trans", csv_dir, csv_filename, field_names)
+        print_means(metric_dpt_masked, num_images, "DPT masked: Trans", csv_dir, csv_filename, field_names)
+        print_means(metric_lapdepth_masked, num_images, "LapDepth masked: Trans", csv_dir, csv_filename, field_names)
+
+        print_means(metric_adabin_masked_opaque, num_images, "Adabin masked: Opaque", csv_dir, csv_filename, field_names)
+        print_means(metric_densedepth_masked_opaque, num_images, "DenseDepth masked: Opaque", csv_dir, csv_filename, field_names)
+        print_means(metric_dpt_masked_opaque, num_images, "DPT masked: Opaque", csv_dir, csv_filename, field_names)
+        print_means(metric_lapdepth_masked_opaque, num_images, "LapDepth masked: Opaque", csv_dir, csv_filename, field_names)
 
 def validateAdaBin(model, device, config, dataloaders_dict, field_names, csv_filename, csv_dir, results_dir, SUBDIR_IMG):
     '''Computes the standard evaluation metrics for [model] from inputs taken of data set 
@@ -525,7 +547,7 @@ def createMetricDict():
     return dict(metric_a1=metric_a1, metric_a2=metric_a2, metric_a3=metric_a3, metric_abs_rel=metric_abs_rel, metric_rmse=metric_rmse, metric_log_10=metric_log_10, metric_rmse_log=metric_rmse_log,
                 metric_si_log=metric_si_log, metric_sq_rel=metric_sq_rel)
 
-def print_means(metric, num_images, model_name, results_dir, csv_filename, field_names, isMaskedArray=False):
+def print_means(metric, num_images, model_name, results_dir, csv_filename, field_names):
     '''Computes the epoch means of evaluation metrics and saves it in the csv file [csv_filename].
     Moreover, it prints the result in console.
 
@@ -537,17 +559,7 @@ def print_means(metric, num_images, model_name, results_dir, csv_filename, field
             csv_filename (str): The csv file name
             field_names (list of str): The csv header field names
     '''
-
-    #epoch_metric_a1 = sum(metric['metric_a1']) / num_images
-    #epoch_metric_a2 = sum(metric['metric_a2']) / num_images
-    #epoch_metric_a3 = sum(metric['metric_a3']) / num_images
-    #epoch_metric_abs_rel = sum(metric['metric_abs_rel']) / num_images
-    #epoch_metric_rmse = sum(metric['metric_rmse']) / num_images
-    #epoch_metric_log_10 = sum(metric['metric_log_10']) / num_images
-    #epoch_metric_rmse_log = sum(metric['metric_rmse_log']) / num_images
-    #epoch_metric_si_log = sum(metric['metric_si_log']) / num_images
-    #epoch_metric_sq_rel = sum(metric['metric_sq_rel']) / num_images    
-
+ 
     epoch_metric_a1 = metric['metric_a1'] / num_images
     epoch_metric_a2 = metric['metric_a2'] / num_images
     epoch_metric_a3 = metric['metric_a3'] / num_images
@@ -582,7 +594,7 @@ def print_means(metric, num_images, model_name, results_dir, csv_filename, field
         .format(model_name, epoch_metric_a1, epoch_metric_a2, epoch_metric_a3, epoch_metric_abs_rel, epoch_metric_rmse,
                 epoch_metric_log_10, epoch_metric_rmse_log, epoch_metric_si_log, epoch_metric_sq_rel, num_images))
 
-def update_metric(metricDict, output, gt, dataset= "clearGrasp", mask=None):
+def update_metric(metricDict, output, gt, dataset= "clearGrasp", mask=None, maskOpaques=True):
     '''Computes the evaluation metrics for [output] and [gt] and updates [metricDict]. Finally, 
     it returns the updated [metricDict] and the computed metrics. 
 
@@ -595,7 +607,7 @@ def update_metric(metricDict, output, gt, dataset= "clearGrasp", mask=None):
             Dict(str, list of float): Updated dictionary having the evaluation metrics
             list of float: The computed metrics
     '''
-    metrics = loss_functions.compute_errors(gt, output, dataset=dataset, masks=mask)
+    metrics = loss_functions.compute_errors(gt, output, dataset=dataset, masks=mask, maskOpaques=maskOpaques)
     metricDict['metric_a1'] += metrics['a1']
     metricDict['metric_a2'] += metrics['a2']
     metricDict['metric_a3'] += metrics['a3']
@@ -645,7 +657,7 @@ def save_images(input_image, output, gt, config, results_dir, SUBDIR_IMG, dataLo
     grid_image = np.concatenate((img_rgb, gt_rgb, output_rgb), 1)
     imageio.imwrite(gt_output_path_rgb, grid_image)
 
-def save_compare_images(input_image, output_adabin, output_densedepth, output_dpt, output_lapdepth, gt, config, results_dir, SUBDIR_IMG, dataLoader_index, batch_index, set_name, norm=10):
+def save_compare_images(input_image, output_adabin, output_densedepth, output_dpt, output_lapdepth, gt, config, results_dir, SUBDIR_IMG, dataLoader_index, batch_index, set_name, norm=4):
     '''Generates for  [input_image], [gt], [output_densedepth], [output_adabin], and [output_dpt] a grid image having their depth map visualizations and 
     saves it in  [results_dir]/[SUBDIR_IMG].
 
@@ -703,24 +715,24 @@ def save_compare_images(input_image, output_adabin, output_densedepth, output_dp
 
     if config.eval.saveNormedImg:
 
-        output_adabin_normed = torch.nn.functional.normalize(output_adabin[0])
+        output_adabin_normed = torch.nn.functional.normalize(output_adabin[0]) * norm
         output_rgb_output_adabin_normed = depth2rgb(output_adabin_normed)
         output_rgb_output_adabin_normed = cv2.resize(
             output_rgb_output_adabin_normed, size, interpolation=cv2.INTER_LINEAR)
     
-        output_densedepth_normed = torch.nn.functional.normalize(output_densedepth[0])
+        output_densedepth_normed = torch.nn.functional.normalize(output_densedepth[0]) * norm
         output_rgb_densedepth_normed = depth2rgb(output_densedepth_normed)
         output_rgb_densedepth_normed = cv2.resize(
             output_rgb_densedepth_normed, size, interpolation=cv2.INTER_LINEAR)
 
 
-        output_dpt_normed = torch.nn.functional.normalize(output_dpt[0])
+        output_dpt_normed = torch.nn.functional.normalize(output_dpt[0]) * norm
         output_rgb_dpt_normed = depth2rgb(output_dpt_normed)
         output_rgb_dpt_normed = cv2.resize(
             output_rgb_dpt_normed, size, interpolation=cv2.INTER_LINEAR)
 
 
-        output_lapdepth_normed = torch.nn.functional.normalize(output_lapdepth[0])
+        output_lapdepth_normed = torch.nn.functional.normalize(output_lapdepth[0]) * norm
         output_rgb_lapdepth_normed = depth2rgb(output_lapdepth_normed)
         output_rgb_lapdepth_normed = cv2.resize(
             output_rgb_lapdepth_normed, size, interpolation=cv2.INTER_LINEAR)
@@ -728,7 +740,7 @@ def save_compare_images(input_image, output_adabin, output_densedepth, output_dp
         img_gt_output_paths_rgb = os.path.join(results_dir, SUBDIR_IMG,
                                            '{:09d}-{}-img-gt-outputs-normed.png'.format(name_prefix, set_name))
 
-        gt_rgb = depth2rgb(torch.nn.functional.normalize(gt[0]))
+        gt_rgb = depth2rgb(torch.nn.functional.normalize(gt[0])) * norm
         gt_rgb = cv2.resize(gt_rgb, size, interpolation=cv2.INTER_LINEAR)
 
         grid_image = np.concatenate(
