@@ -348,8 +348,8 @@ def train(gpu, config, writer):
         model = DenseDepth()
     elif config.train.model == 'adabin':
         from models.AdaBin import UnetAdaptiveBins
-        model = UnetAdaptiveBins.build(n_bins=config.train.adabin.n_bins, min_val=config.train.adabin.min_depth,
-                                       max_val=config.train.adabin.max_depth, norm=config.train.adabin.norm)
+        model = UnetAdaptiveBins.build(n_bins=256, min_val=config.train.min_depth,
+                                       max_val=config.train.max_depth, norm='linear')
     elif config.train.model == 'dpt':
         from models.DPT.models import DPTDepthModel
         model = DPTDepthModel(
@@ -367,8 +367,11 @@ def train(gpu, config, writer):
                 'encoder': 'ResNext101',
                 'norm': 'BN',
                 'act': 'ReLU',
-                'max_depth': config.train.adabin.max_depth,
+                'max_depth': config.train.max_depth,
             })
+    elif config.train.model == 'newcrf':
+        from models.NewCRFDepth.NewCRFDepth import NewCRFDepth
+        model = NewCRFDepth(version='large07', inv_depth=False, max_depth=config.train.max_depth, pretrained=None)
     else:
         raise ValueError(
             'Invalid model "{}" in config file. Must be one of ["densedepth", "adabin", "dpt"]'
@@ -397,6 +400,7 @@ def train(gpu, config, writer):
     if config.train.continueTraining and config.train.initOptimizerFromCheckpoint:
         if 'optimizer_state_dict' in CHECKPOINT:
             optimizer.load_state_dict(CHECKPOINT['optimizer_state_dict'])
+            #optimizer.step(START_EPOCH)
         else:
             print(
                 colored(
@@ -441,27 +445,14 @@ def train(gpu, config, writer):
 
     if (config.train.continueTraining and config.train.loadEpochNumberFromCheckpoint):
         total_iter_num = CHECKPOINT['total_iter_num'] + 1
-        START_EPOCH = CHECKPOINT['epoch'] + 1
-        END_EPOCH = CHECKPOINT['epoch'] + config.train.numEpochs
-        if config.train.lrScheduler == 'OneCycleLR':
-            lr_scheduler.step(START_EPOCH)
+        START_EPOCH = CHECKPOINT['epoch'] 
+        END_EPOCH = config.train.numEpochs
+        #if config.train.lrScheduler == 'OneCycleLR':
+        #    lr_scheduler.step(START_EPOCH)
+
+    framework_train.trainDenseDepth(config.train.model, writer, device, model, trainLoader, syntheticValidationLoader, realValidationLoader, optimizer,criterion,  lr_scheduler, START_EPOCH,
+                                  END_EPOCH, total_iter_num, config.train.validateModelInterval, CHECKPOINT_DIR, config_yaml)
     
-    if config.train.model == 'densedepth':
-        framework_train.trainDenseDepth(writer, device, model, trainLoader, syntheticValidationLoader, realValidationLoader, optimizer,criterion,  lr_scheduler, START_EPOCH,
-                                  END_EPOCH, total_iter_num, config.train.validateModelInterval, CHECKPOINT_DIR, config_yaml)
-    elif config.train.model == 'adabin':
-        framework_train.trainAdaBin(writer, device, model, trainLoader, syntheticValidationLoader, realValidationLoader, optimizer,criterion, lr_scheduler , START_EPOCH,
-                              END_EPOCH, total_iter_num, config.train.validateModelInterval, CHECKPOINT_DIR, config_yaml)
-    elif config.train.model == 'dpt':
-        framework_train.trainDPT(writer, device, model, trainLoader, syntheticValidationLoader, realValidationLoader, optimizer,criterion,  lr_scheduler, START_EPOCH,
-                                  END_EPOCH, total_iter_num, config.train.validateModelInterval, CHECKPOINT_DIR, config_yaml)
-    elif config.train.model == 'lapdepth':
-        framework_train.trainLapDepth(writer, device, model, trainLoader, syntheticValidationLoader, realValidationLoader, optimizer,criterion, lr_scheduler , START_EPOCH,
-                              END_EPOCH, total_iter_num, config.train.validateModelInterval, CHECKPOINT_DIR, config_yaml)
-    else:
-        raise ValueError(
-            'Invalid model "{}" in config file. Must be one of ["densedepth", "adabin", "dpt"]'
-            .format(config.train.model))
 
 
 if __name__ == '__main__':

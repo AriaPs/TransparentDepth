@@ -27,7 +27,131 @@ from utils.api import depth2rgb, exr_saver
 import loss_functions
 
 
-def validateAll(model_adabin, model_densedepth, model_dpt, model_lapdepth, device, config, dataloaders_dict, field_names, csv_filename, csv_dir, results_dir, SUBDIR_IMG):
+def validateAll(model_dpt, newCRF_model, device, config, dataloaders_dict, field_names, csv_filename, csv_dir, results_dir, SUBDIR_IMG):
+    '''Computes the standard evaluation metrics for [model_adabin], [model_densedepth], [model_dpt] from inputs taken of data set 
+    listed in [dataloaders_dict] and saves it in the csv file [csv_filename].
+    The results are saved in [results_dir] and the images in [results_dir]/[SUBDIR_IMG].
+
+        Args:
+            model_adabin (torch.nn.Module): The model instance of AdaBins
+            model_densedepth (torch.nn.Module): The model instance of DenseDepth
+            model_dpt (torch.nn.Module): The model instance of DPT
+            device (list of int): List of GPU ids on which the model is trained
+            config (dict): The parsed configuration YAML file
+            dataloaders_dict (dict(str, DataLoader)): A dictionary having the name of DataLoader as key and the DataLoader as value
+            field_names (list of str): A list of csv header field names. 
+            csv_filename (str): Csv file name
+            results_dir (str): The output path
+            SUBDIR_IMG (str): The path where the img outputs are saved
+
+    '''
+
+    model_dpt.eval()
+    newCRF_model.eval()
+    criterion =loss_functions.SILogLoss()
+    #criterion_ssim = loss_functions.ssim
+
+    ### Run Validation and Test Set ###
+    print('\nCompare Validation of all Models')
+    print('-' * 50 + '\n')
+    print(colored('Results will be saved to: {}\n'.format(
+        config.eval.resultsDir), 'green'))
+
+    for key in dataloaders_dict:
+        print('Running on {} dataset:'.format(key))
+        print('=' * 30)
+
+        running_loss_dpt = 0.0
+        metric_dpt = createMetricDict()
+        metric_dpt_masked = createMetricDict()
+        metric_dpt_masked_opaque = createMetricDict()
+
+        running_loss_newcrf = 0.0
+        metric_newcrf = createMetricDict()
+        metric_newcrf_masked = createMetricDict()
+        metric_newcrf_masked_opaque = createMetricDict()
+
+        testLoader = dataloaders_dict[key]
+        for ii, sample_batched in enumerate(tqdm(testLoader)):
+
+            inputs, mask, depths = sample_batched
+
+            depths = depths.to(device)
+
+            # Forward pass of the mini-batch
+            with torch.no_grad():
+                input = inputs.to(device)
+                _ , model_output_newcrf = newCRF_model(input)
+                model_output_dpt = model_dpt(input)
+                # [BXHXW] --> [BX1XHXW]
+                model_output_dpt = torch.unsqueeze(model_output_dpt, 1)
+
+            # Compute the loss
+
+            loss_newcrf = criterion(model_output_newcrf, depths, mask=mask, interpolate= False)
+            running_loss_newcrf += loss_newcrf.item()
+
+            loss_dpt = criterion(model_output_dpt, depths, mask=mask, interpolate= False)
+            running_loss_dpt += loss_dpt.item()
+
+            # Save output images, one at a time, to results
+            img_tensor = inputs.detach()
+            output_tensor_dpt = model_output_dpt.detach().cpu()
+            output_tensor_newcrf = model_output_newcrf.detach().cpu()
+            depth_tensor = depths.detach().cpu()
+            mask_tensor = mask.detach().cpu()
+
+            # Extract each tensor within batch and save results
+            for iii, sample_batched in enumerate(zip(img_tensor, output_tensor_dpt, output_tensor_newcrf, depth_tensor, mask_tensor)):
+                img, output_dpt, output_newcrf, gt, mask = sample_batched
+                
+                # Calc metrics
+                metric_dpt, batch_metric_dpt = update_metric(metric_dpt, output_dpt, gt, config.eval.dataset)
+                metric_newcrf, batch_metric_newcrf = update_metric(metric_newcrf, output_newcrf, gt, config.eval.dataset)
+
+                metric_dpt_masked, batch_metric_dpt_masked = update_metric(metric_dpt_masked, output_dpt, gt, config.eval.dataset, mask=mask)
+                metric_newcrf_masked, batch_metric_newcrf_masked = update_metric(metric_newcrf_masked, output_newcrf, gt, config.eval.dataset, mask=mask)
+
+                metric_dpt_masked_opaque, batch_metric_dpt_masked_opaque = update_metric(metric_dpt_masked_opaque, output_dpt, gt, config.eval.dataset, mask=mask, maskOpaques=False)
+                metric_newcrf_masked_opaque, batch_metric_newcrf_masked_opaque = update_metric(metric_newcrf_masked_opaque, output_newcrf, gt, config.eval.dataset, mask=mask, maskOpaques=False)
+
+                # Write the data into a csv file
+                write_csv_row("DPT", config.eval.batchSize, batch_metric_dpt,
+                              csv_dir, field_names, csv_filename, ii, iii)
+                write_csv_row("DPT masked: Trans", config.eval.batchSize, batch_metric_dpt_masked,
+                              csv_dir, field_names, csv_filename, ii, iii)
+                write_csv_row("DPT masked: Opaque", config.eval.batchSize, batch_metric_dpt_masked_opaque,
+                              csv_dir, field_names, csv_filename, ii, iii)
+                write_csv_row("NewCRF", config.eval.batchSize, batch_metric_newcrf,
+                              csv_dir, field_names, csv_filename, ii, iii)
+                write_csv_row("NewCRF masked: Trans", config.eval.batchSize, batch_metric_newcrf_masked,
+                              csv_dir, field_names, csv_filename, ii, iii)
+                write_csv_row("NewCRF masked: Opaque", config.eval.batchSize, batch_metric_newcrf_masked_opaque,
+                              csv_dir, field_names, csv_filename, ii, iii)
+
+                if config.eval.saveCompareImage:
+                    save_compare_images(img, output_dpt, output_newcrf,
+                                    gt, config, results_dir, SUBDIR_IMG, ii, iii, key)
+
+        num_batches = len(testLoader)  # Num of batches
+        num_images = len(testLoader.dataset)  # Num of total images
+        print('\nnum_batches:', num_batches)
+        print('num_images:', num_images)
+        epoch_loss_dpt = running_loss_dpt / num_batches
+        epoch_loss_newcrf = running_loss_newcrf / num_batches
+        print('Test Mean Loss DPT: {:.4f} \n'.format(epoch_loss_dpt))
+        print('Test Mean Loss newcrf: {:.4f} \n'.format(epoch_loss_newcrf))
+
+        print_means(metric_dpt, num_images, "DPT", csv_dir, csv_filename, field_names)
+        print_means(metric_newcrf, num_images, "NewCRF", csv_dir, csv_filename, field_names)
+
+        print_means(metric_dpt_masked, num_images, "DPT masked: Trans", csv_dir, csv_filename, field_names)
+        print_means(metric_newcrf_masked, num_images, "NewCRF masked: Trans", csv_dir, csv_filename, field_names)
+
+        print_means(metric_dpt_masked_opaque, num_images, "DPT masked: Opaque", csv_dir, csv_filename, field_names)
+        print_means(metric_newcrf_masked_opaque, num_images, "NewCRF masked: Opaque", csv_dir, csv_filename, field_names)
+
+def validateAll_old(model_adabin, model_densedepth, model_dpt, model_lapdepth, device, config, dataloaders_dict, field_names, csv_filename, csv_dir, results_dir, SUBDIR_IMG):
     '''Computes the standard evaluation metrics for [model_adabin], [model_densedepth], [model_dpt] from inputs taken of data set 
     listed in [dataloaders_dict] and saves it in the csv file [csv_filename].
     The results are saved in [results_dir] and the images in [results_dir]/[SUBDIR_IMG].
@@ -50,7 +174,7 @@ def validateAll(model_adabin, model_densedepth, model_dpt, model_lapdepth, devic
     model_densedepth.eval()
     model_dpt.eval()
     model_lapdepth.eval()
-    criterion_ssim =loss_functions.SILogLoss()
+    criterion =loss_functions.SILogLoss()
     #criterion_ssim = loss_functions.ssim
 
     ### Run Validation and Test Set ###
@@ -102,17 +226,17 @@ def validateAll(model_adabin, model_densedepth, model_dpt, model_lapdepth, devic
 
             # Compute the loss
 
-            loss_adabin = criterion_ssim(model_output_adabin, depths, mask=mask)
+            loss_adabin = criterion(model_output_adabin, depths, mask=mask)
 
             running_loss_adabin += loss_adabin.item()
 
-            loss_densedepth = criterion_ssim(model_output_densedepth, depths, mask=mask)
+            loss_densedepth = criterion(model_output_densedepth, depths, mask=mask)
             running_loss_densedepth += loss_densedepth.item()
 
-            loss_lapdepth = criterion_ssim(model_output_lapdepth, depths, mask=mask)
+            loss_lapdepth = criterion(model_output_lapdepth, depths, mask=mask)
             running_loss_lapdepth += loss_lapdepth.item()
 
-            loss_dpt = criterion_ssim(model_output_dpt, depths, mask=mask, interpolate= False)
+            loss_dpt = criterion(model_output_dpt, depths, mask=mask, interpolate= False)
             running_loss_dpt += loss_dpt.item()
 
             
@@ -179,7 +303,7 @@ def validateAll(model_adabin, model_densedepth, model_dpt, model_lapdepth, devic
                               csv_dir, field_names, csv_filename, ii, iii)
 
                 if config.eval.saveCompareImage:
-                    save_compare_images(img, output_adabin, output_densedepth, output_dpt, output_lapdepth,
+                    save_compare_images_old(img, output_adabin, output_densedepth, output_dpt, output_lapdepth,
                                     gt, config, results_dir, SUBDIR_IMG, ii, iii, key)
 
         num_batches = len(testLoader)  # Num of batches
@@ -657,7 +781,105 @@ def save_images(input_image, output, gt, config, results_dir, SUBDIR_IMG, dataLo
     grid_image = np.concatenate((img_rgb, gt_rgb, output_rgb), 1)
     imageio.imwrite(gt_output_path_rgb, grid_image)
 
-def save_compare_images(input_image, output_adabin, output_densedepth, output_dpt, output_lapdepth, gt, config, results_dir, SUBDIR_IMG, dataLoader_index, batch_index, set_name, norm=4):
+def save_compare_images(input_image, output_dpt, output_newcrf, gt, config, results_dir, SUBDIR_IMG, dataLoader_index, batch_index, set_name, norm=5):
+    '''Generates for  [input_image], [gt], [output_densedepth], [output_adabin], and [output_dpt] a grid image having their depth map visualizations and 
+    saves it in  [results_dir]/[SUBDIR_IMG].
+
+        Args:
+            input_image (Torch.Tensor): Dictionary saving the evaluation metrics
+            output_adabin (Torch.Tensor): The network output of AdaBins
+            output_densedepth (Torch.Tensor): The network output of DenseDepth
+            output_dpt (Torch.Tensor): The network output of DPT
+            gt (Torch.Tensor): The ground truth
+            config (dict): The parsed configuration YAML file
+            results_dir (str): The path where the outputs are saved
+            SUBDIR_IMG (str): The name of folder where images are saved
+            dataLoader_index (int): The index of a batch in Dataloader
+            batch_index (int): The index of image in a batch
+            set_name (str): The name of test set (Real or Synthtetic)
+
+    '''
+    size = (config.eval.imgWidth, config.eval.imgHeight)
+
+    # Save PNG
+
+    output_rgb_dpt = depth2rgb(output_dpt[0])
+    output_rgb_dpt = cv2.resize(
+        output_rgb_dpt, size, interpolation=cv2.INTER_LINEAR)
+
+    output_rgb_newcrf = depth2rgb(output_newcrf[0])
+    output_rgb_newcrf = cv2.resize(
+        output_rgb_newcrf, size, interpolation=cv2.INTER_LINEAR)
+
+    
+
+    gt_rgb = depth2rgb(gt[0])
+    gt_rgb = cv2.resize(gt_rgb, size, interpolation=cv2.INTER_LINEAR)
+    
+    img = cv2.normalize(input_image.numpy().transpose(1, 2, 0), None, 0, 255, cv2.NORM_MINMAX, cv2.CV_8U)
+
+    name_prefix = dataLoader_index * config.eval.batchSize + batch_index
+
+    ##### save png files
+
+    img_gt_output_paths_rgb = os.path.join(results_dir, SUBDIR_IMG,
+                                       '{:09d}-{}-img-gt-outputs.png'.format(name_prefix, set_name))
+
+    grid_image = np.concatenate(
+        (img, gt_rgb, output_rgb_dpt, output_rgb_newcrf), 1)
+
+    imageio.imwrite(img_gt_output_paths_rgb, grid_image)
+
+    if config.eval.saveNormedImg:
+
+        output_dpt_normed = torch.nn.functional.normalize(output_dpt[0]) * norm
+        output_rgb_dpt_normed = depth2rgb(output_dpt_normed)
+        output_rgb_dpt_normed = cv2.resize(
+            output_rgb_dpt_normed, size, interpolation=cv2.INTER_LINEAR)
+
+
+        output_newcrf_normed = torch.nn.functional.normalize(output_newcrf[0]) * norm
+        output_rgb_newcrf_normed = depth2rgb(output_newcrf_normed)
+        output_rgb_newcrf_normed = cv2.resize(
+            output_rgb_newcrf_normed, size, interpolation=cv2.INTER_LINEAR)
+
+        img_gt_output_paths_rgb = os.path.join(results_dir, SUBDIR_IMG,
+                                           '{:09d}-{}-img-gt-outputs-normed.png'.format(name_prefix, set_name))
+
+        gt_rgb = depth2rgb(torch.nn.functional.normalize(gt[0])) * norm
+        gt_rgb = cv2.resize(gt_rgb, size, interpolation=cv2.INTER_LINEAR)
+
+        grid_image = np.concatenate(
+            (img, gt_rgb, output_rgb_dpt_normed, output_rgb_newcrf_normed), 1)
+
+        imageio.imwrite(img_gt_output_paths_rgb, grid_image)
+
+    ##### save exr files
+    if config.eval.saveEXR:
+        save_path_exr = os.path.join(results_dir, SUBDIR_IMG,
+                                           '{:09d}-{}-gt-normed.exr'.format(name_prefix, set_name))
+                                           
+        save_path_exr = os.path.join(results_dir, SUBDIR_IMG,
+                                           '{:09d}-{}-depth-newcrf-normed.exr'.format(name_prefix, set_name))
+    
+        exr_saver(save_path_exr, output_newcrf_normed.numpy())
+    
+        save_path_exr = os.path.join(results_dir, SUBDIR_IMG,
+                                           '{:09d}-{}-depth-newcrf.exr'.format(name_prefix, set_name))
+                                           
+        exr_saver(save_path_exr, output_newcrf[0].numpy())
+    
+        save_path_exr = os.path.join(results_dir, SUBDIR_IMG,
+                                           '{:09d}-{}-depth-dpt-normed.exr'.format(name_prefix, set_name))
+    
+        exr_saver(save_path_exr, output_dpt_normed.numpy())
+    
+        save_path_exr = os.path.join(results_dir, SUBDIR_IMG,
+                                           '{:09d}-{}-depth-dpt.exr'.format(name_prefix, set_name))
+                                           
+        exr_saver(save_path_exr, output_dpt[0].numpy())
+ 
+def save_compare_images_old(input_image, output_adabin, output_densedepth, output_dpt, output_lapdepth, gt, config, results_dir, SUBDIR_IMG, dataLoader_index, batch_index, set_name, norm=4):
     '''Generates for  [input_image], [gt], [output_densedepth], [output_adabin], and [output_dpt] a grid image having their depth map visualizations and 
     saves it in  [results_dir]/[SUBDIR_IMG].
 

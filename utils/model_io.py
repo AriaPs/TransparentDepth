@@ -117,6 +117,8 @@ def load_origin_Checkpoint(pathWeightsFile, model_name, model):
 
 
         model.load_state_dict(keras_state_dict)
+        del keras_state_dict
+        del model_tf
 
         #custom_objects = {
         #    'BilinearUpSampling2D': tf.keras.layers.UpSampling2D, 'depth_loss_function': None}
@@ -163,6 +165,8 @@ def load_origin_Checkpoint(pathWeightsFile, model_name, model):
                 modified[k] = v  # else keep the original
 
         model.load_state_dict(modified)
+        del CHECKPOINT
+        del modified
     elif model_name == 'dpt':
         parameters = torch.load(pathWeightsFile, map_location=torch.device("cpu"))
 
@@ -170,6 +174,7 @@ def load_origin_Checkpoint(pathWeightsFile, model_name, model):
             parameters = parameters["model"]
 
         model.load_state_dict(parameters)
+        del parameters
     elif model_name == 'lapdepth':
         model_state = torch.load(
             pathWeightsFile, map_location='cpu')
@@ -183,6 +188,20 @@ def load_origin_Checkpoint(pathWeightsFile, model_name, model):
                 load_dict[k] = v
        
         model.load_state_dict(load_dict)
+        del model_state
+        del load_dict
+    elif model_name == 'newcrf':
+        CHECKPOINT = torch.load(pathWeightsFile, map_location='cpu')
+        load_dict = {}
+        model_state = CHECKPOINT['model']
+        for k, v in model_state.items():
+            if k.startswith('module.'):
+                k_ = k[7:]
+                load_dict[k_] = v
+            else:
+                load_dict[k] = v
+        model.load_state_dict(load_dict)
+        del model_state
     else:
         raise ValueError('Invalid origin is given for transfer learning.\
                 The model {} is not supported'.format(model_name))

@@ -35,24 +35,21 @@ train:
 
   # TransDepth paths
 
-  transDepthDatasetTrain: '/gris/gris-f/homelv/ajamili/vc/setGen/output_train/'
+  transDepthDatasetTrain: '/gris/gris-f/homelv/ajamili/DataSet/transDepth/train/'
 
-  transDepthDatasetVal: '/gris/gris-f/homelv/ajamili/vc/setGen/output_val/'
+  transDepthDatasetVal: '/gris/gris-f/homelv/ajamili/DataSet/transDepth/val/'
         
-  model: "densedepth" # Possible values: ['densedepth', 'adabin', 'dpt', 'lapdepth']
-  adabin:
-    n_bins: 256
-    min_depth: 0.1
-    max_depth: 1.5
-    norm: 'linear'
+  model: "newcrf" # Possible values: ['densedepth', 'adabin', 'dpt', 'lapdepth', 'newcrf']
+  min_depth: 0.1
+  max_depth: 5
   dataset: 'transDepth' # Possible Values: ['clearGrasp', 'nyu',transDepth] 
-  batchSize: 4
+  batchSize: 2
   validationBatchSize: 8
   testBatchSize: 8
-  numEpochs: 3
-  imgHeight: 480
-  imgWidth: 640
-  numWorkers: 1 # Num of workers used in the dataloader
+  numEpochs: 1
+  imgHeight: 512
+  imgWidth: 512
+  numWorkers: 2 # Num of workers used in the dataloader
   logsDir: "logs" # Directory where logs of each exp will be saved.
   lossFunc: "SILog" # Possible values: ['SSIM','SILog', ]
   percentageDataForTraining: 1.0 # The percentage of images in training dataset to be used for training.
@@ -62,14 +59,15 @@ train:
 
   
   continueTraining: True # If true, continue training from a checkpoint
-  loadProjektCheckpoints: False # If true, dont load origin checkpoints instead continue training from a thesis checkpoint
+  loadProjektCheckpoints: True # If true, dont load origin checkpoints instead continue training from a thesis checkpoint
   # "./models/AdaBin/weights/origin/AdaBins_nyu.pt" "./models/DenseDepth/weights/origin/nyu.h5" "./models/DPT/weights/origin/dpt_hybrid_nyu-2ce69ec7.pt"
-  #  "./models/LapDepth/weights/origin/LDRN_NYU_ResNext101_pretrained_data.pkl" "./logs/exp-000/checkpoints/checkpoint-epoch-0001.pth" 
-  pathPrevCheckpoint: "./models/DenseDepth/weights/origin/nyu.h5" # Path to .pth checkpoint file to load to continue training from 
-  initOptimizerFromCheckpoint: False # Re-Initialize optimizer's state from checkpoint. NOTE: when this is enabled, value of learningRate will be overridden with value from checkpoint.
-  loadEpochNumberFromCheckpoint: False # If true, the epoch/iter numbering will start from the checkpoint's last epoch num.
+  #  "./models/LapDepth/weights/origin/LDRN_NYU_ResNext101_pretrained_data.pkl"  "./models/NewCRFDepth/weights/origin/model_nyu.ckpt"
+  # "./logs/exp-000/checkpoints/checkpoint-best.pth"  checkpoint-epoch-0000.pth
+  pathPrevCheckpoint: "./logs/exp-001/checkpoints/checkpoint-epoch-0000.pth" # Path to .pth checkpoint file to load to continue training from 
+  initOptimizerFromCheckpoint: True # Re-Initialize optimizer's state from checkpoint. NOTE: when this is enabled, value of learningRate will be overridden with value from checkpoint.
+  loadEpochNumberFromCheckpoint: True # If true, the epoch/iter numbering will start from the checkpoint's last epoch num.
 
-  validateModelInterval: 4 # Run on val set every n validateModelInterval epochs
+  validateModelInterval: 6 # Run on val set every n validateModelInterval epochs
 
   # Optimizer Params
   optimAdamW:
@@ -122,14 +120,14 @@ eval:
   
   # origing checkpoints  
   # "./models/AdaBin/weights/origin/AdaBins_nyu.pt" "./models/DenseDepth/weights/origin/nyu.h5" "./models/DPT/weights/origin/dpt_hybrid_nyu-2ce69ec7.pt"
-  # "./models/LapDepth/weights/origin/LDRN_NYU_ResNext101_pretrained_data.pkl"
+  # "./models/LapDepth/weights/origin/LDRN_NYU_ResNext101_pretrained_data.pkl" "./models/NewCRFDepth/weights/origin/model_nyu.ckpt"
   # SSIM/SI checkpoints:
   # "./models/AdaBin/weights/trained/adabin_SSIM.pth" "./models/DenseDepth/weights/trained/densedepth_SSIM.pth" "./models/DPT/weights/trained/dpt_SSIM_imgaug.pth"
   # "./models/LapDepth/weights/trained/lapdepth_SSIM.pth"
   # Params
   otherSets:
     filenames_file_nyu: './DataSet/nyu_depth_v2/nyudepthv2_test_files_with_gt.txt'
-  dataset: 'transDepth' # Possible Values: ['clearGrasp', 'nyu', transDepth] 
+  dataset: 'transDepth' # Possible Values: ['clearGrasp', 'nyu', 'transDepth'] 
   densedepth:
     should_validate: False
     saveImgae: True
@@ -137,24 +135,28 @@ eval:
   adabin:
     should_validate: False
     saveImgae: True
-    pathWeightsFile: "./models/AdaBin/weights/trained/adabin_SI.pth" # Path to the checkpoint to be loaded
+    pathWeightsFile: "./logs/Adabin/checkpoints/checkpoint-best.pth" # Path to the checkpoint to be loaded
     n_bins: 256
     norm: 'linear'
   dpt:
     should_validate: False
     saveImgae: True
-    pathWeightsFile: "./models/DPT/weights/trained/dpt_SI.pth" # Path to the checkpoint to be loaded
+    pathWeightsFile: "./logs/dpt/checkpoints/checkpoint-best.pth" # Path to the checkpoint to be loaded
   lapdepth:
     should_validate: True
     saveImgae: True
     pathWeightsFile: "./models/LapDepth/weights/trained/lapdepth_SI.pth" # Path to the checkpoint to be loaded
+  newcrf:
+    should_validate: True
+    saveImgae: True
+    pathWeightsFile: "./models/NewCRFDepth/weights/origin/model_nyu.ckpt" # Path to the checkpoint to be loaded
   compareResult: True
-  saveCompareImage: False
+  saveCompareImage: True
   saveNormedImg: False
   loadProjektCheckpoints: True # If true, dont load origin checkpoints
   batchSize: 8
   min_depth: 0.1
-  max_depth: 4
+  max_depth: 5
   saveEXR: False
   imgHeight: 512
   imgWidth: 512

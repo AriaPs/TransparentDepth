@@ -28,10 +28,8 @@ import dataloader_clearGrasp
 import dataloader_nyu
 import dataloader_transDepth
 from utils import framework_eval, model_io
-from models.DenseDepth import DenseDepth
-from models.AdaBin import UnetAdaptiveBins
 
-os.environ["CUDA_VISIBLE_DEVICES"] = "2"
+os.environ["CUDA_VISIBLE_DEVICES"] = "4"
 device_ids = [0]
 
 
@@ -249,7 +247,8 @@ if __name__ == '__main__':
     if torch.cuda.device_count() > 1:
             print("Let's use", torch.cuda.device_count(), "GPUs!")
 
-    if config.eval.compareResult or config.eval.densedepth.should_validate:
+    if (config.eval.compareResult and config.eval.dataset in ['clearGrasp','nyu']) or config.eval.densedepth.should_validate:
+        from models.DenseDepth import DenseDepth
         # DenseDepth
         densedepth_model = DenseDepth()
         if config.eval.loadProjektCheckpoints:
@@ -262,7 +261,8 @@ if __name__ == '__main__':
             densedepth_model = nn.DataParallel(densedepth_model)
         densedepth_model = densedepth_model.to(device)
 
-    if config.eval.compareResult or config.eval.adabin.should_validate:
+    if (config.eval.compareResult and config.eval.dataset  in ['clearGrasp','nyu']) or config.eval.adabin.should_validate:
+        from models.AdaBin import UnetAdaptiveBins
         # Adabin
         adabin_model = UnetAdaptiveBins.build(n_bins=config.eval.adabin.n_bins, min_val=config.eval.min_depth,
                                               max_val=config.eval.max_depth, norm=config.eval.adabin.norm)
@@ -296,7 +296,7 @@ if __name__ == '__main__':
             dpt_model = nn.DataParallel(dpt_model)
         dpt_model = dpt_model.to(device)
     
-    if config.eval.compareResult or config.eval.lapdepth.should_validate:
+    if (config.eval.compareResult and config.eval.dataset  in ['clearGrasp','nyu']) or config.eval.lapdepth.should_validate:
         from models.LapDepth import LDRN
         lapdepth_model = LDRN({
                 'lv6': False,
@@ -316,6 +316,21 @@ if __name__ == '__main__':
         if torch.cuda.device_count() > 1:
             lapdepth_model = nn.DataParallel(lapdepth_model)
         lapdepth_model = lapdepth_model.to(device)
+
+    if (config.eval.compareResult and config.eval.dataset =='transDepth') or config.eval.lapdepth.should_validate:
+        from models.NewCRFDepth.NewCRFDepth import NewCRFDepth
+        newCRF_model = NewCRFDepth(version='large07', inv_depth=False, max_depth=config.eval.max_depth, pretrained=None)
+        
+        if config.eval.loadProjektCheckpoints:
+            _ , newCRF_model = model_io.load_checkpoint(
+            config.eval.newcrf.pathWeightsFile, newCRF_model)
+        else:
+            newCRF_model = model_io.load_origin_Checkpoint(config.eval.newcrf.pathWeightsFile, 'newcrf', newCRF_model)
+        
+        # Enable Multi-GPU training
+        if torch.cuda.device_count() > 1:
+            newCRF_model = nn.DataParallel(lapdepth_model)
+        newCRF_model = newCRF_model.to(device)
         
 
 
@@ -329,7 +344,11 @@ if __name__ == '__main__':
 
         field_names = create_csv(csv_filename, csv_dir)
 
-        framework_eval.validateAll(adabin_model, densedepth_model, dpt_model, lapdepth_model, device, config, dataloaders_dict,
+        if config.eval.dataset  in ['clearGrasp','nyu']:
+            framework_eval.validateAll(adabin_model, densedepth_model, dpt_model, lapdepth_model, device, config, dataloaders_dict,
+                                   field_names, csv_filename, csv_dir, results_dir, SUBDIR_IMG)
+        else:
+            framework_eval.validateAll(dpt_model, newCRF_model, device, config, dataloaders_dict,
                                    field_names, csv_filename, csv_dir, results_dir, SUBDIR_IMG)
     else:
         # else compare only the specified models
@@ -366,9 +385,19 @@ if __name__ == '__main__':
         elif config.eval.lapdepth.should_validate:
 
             # Create CSV File to store error metrics
-            csv_filename = 'dpt_computed_errors_exp_{:03d}.csv'.format(prev_run_id)
+            csv_filename = 'lapdepth_computed_errors_exp_{:03d}.csv'.format(prev_run_id)
 
             field_names = create_csv(csv_filename, csv_dir)
 
             framework_eval.validateLapDepth(lapdepth_model, device, config, dataloaders_dict,
+                                          field_names, csv_filename, csv_dir, results_dir, SUBDIR_IMG) 
+                                        
+        elif config.eval.newcrf.should_validate:
+
+            # Create CSV File to store error metrics
+            csv_filename = 'dpt_computed_errors_exp_{:03d}.csv'.format(prev_run_id)
+
+            field_names = create_csv(csv_filename, csv_dir)
+
+            framework_eval.validateNewCRF(newCRF_model, device, config, dataloaders_dict,
                                           field_names, csv_filename, csv_dir, results_dir, SUBDIR_IMG) 
