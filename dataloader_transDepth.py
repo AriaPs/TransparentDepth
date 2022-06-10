@@ -18,8 +18,6 @@ import h5py
 import torch
 from torch.utils.data import Dataset, DataLoader
 from torchvision import transforms
-from imgaug import augmenters as iaa
-import imgaug as ia
 
 from utils.api import exr_loader, depthTensor2rgbTensor, imageTensor2PILTensor
 
@@ -37,12 +35,9 @@ def preprocessing_transforms(mode):
     ])
 
 class ToTensor(object):
-    def __init__(self):
-        self.normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
 
     def __call__(self, image):
         image = self.to_tensor(image)
-        image = self.normalize(image)
         return image
 
     def to_tensor(self, pic):
@@ -98,12 +93,6 @@ class TransDepthTransDepth(Dataset):
         super().__init__()
 
         self.input_dir = input_dir
-        self.transform = iaa.Sequential([
-            iaa.Resize({
-                "height": 512,
-                "width": 512
-            }, interpolation='nearest'),
-        ]).to_deterministic()
         self.mode = mode
 
         # Create list of filenames
@@ -137,22 +126,14 @@ class TransDepthTransDepth(Dataset):
             _depth = np.array(f["distance"], dtype=np.float32)
             _depth[np.isnan(_depth)] = -1.0
             _depth[np.isinf(_depth)] = -1.0
+            mask = np.all(_depth == -1.0, axis=0)
+            _depth[:, mask] = 0.0
             _depth = np.expand_dims(_depth, axis=0)
+            _depth = np.ascontiguousarray(_depth)
 
             # Open input masks   
             _mask = np.array(f["class_segmaps"], dtype=np.float32)
             _mask = np.expand_dims(_mask, axis=0)
-
-            # Apply image augmentations and convert to Tensor
-            if self.transform:
-                det_tf = self.transform.to_deterministic()
-                # Making all values of invalid pixels marked as -1.0 to 0.
-                # In raw data, invalid pixels are marked as (-1, -1, -1) so that on conversion to RGB they appear black.
-                mask = np.all(_depth == -1.0, axis=0)
-                _depth[:, mask] = 0.0
-                _depth = _depth.transpose((1, 2, 0))  # To Shape: (H, W, 3)
-                _depth = det_tf.augment_image(_depth, hooks=ia.HooksImages(activator=self._activator_masks))
-                _depth = np.ascontiguousarray(_depth)
 
             if self.mode=='train':
                 _img, _depth, _mask = self._train_preprocess(_img, _depth, _mask)
@@ -160,7 +141,7 @@ class TransDepthTransDepth(Dataset):
             # Return Tensors
             _img_tensor = ToTensor()(_img)
 
-            _depth_tensor = torch.from_numpy(_depth.transpose((2, 0, 1)).copy())
+            _depth_tensor = torch.from_numpy(_depth)
 
             _mask_tensor = torch.from_numpy(_mask)
 
@@ -188,25 +169,19 @@ class TransDepthTransDepth(Dataset):
         if numImages == 0:
             raise ValueError('No hdf5 found in given directory. Searched in dir: {} '.format(input_dir))
 
-        
-
-    def _activator_masks(self, images, augmenter, parents, default):
-        '''Used with imgaug to help only apply some augmentations to images and not depths
-        Eg: Blur is applied to input only, not depth. However, resize is applied to both.
-        '''
-        return default
-
     def _train_preprocess(self, image, depth_gt, mask):
         # Random flipping
         do_flip = random.random()
         if do_flip > 0.5:
+            image = image.transpose((2, 0, 1))
             image = (image[:, ::-1, :]).copy()
             depth_gt = (depth_gt[:, ::-1, :]).copy()
             mask = (mask[:, ::-1, :]).copy()
+            image = image.transpose((1,2,0))
 
         # Random gamma, brightness, color augmentation
         do_augment = random.random()
-        if do_augment > 0.33:
+        if do_augment > 0.5:
             image = self._augment_image(image)
 
         return image, depth_gt, mask

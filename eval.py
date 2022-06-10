@@ -29,7 +29,7 @@ import dataloader_nyu
 import dataloader_transDepth
 from utils import framework_eval, model_io
 
-os.environ["CUDA_VISIBLE_DEVICES"] = "4"
+os.environ["CUDA_VISIBLE_DEVICES"] = "2"
 device_ids = [0]
 
 
@@ -189,7 +189,6 @@ def get_ClearGrasp_DataLoader_with_imgaug(config):
 
 
 if __name__ == '__main__':
-
     print('Depth Map Estimation of transparent structures. Loading checkpoint...')
 
     parser = argparse.ArgumentParser(
@@ -317,7 +316,7 @@ if __name__ == '__main__':
             lapdepth_model = nn.DataParallel(lapdepth_model)
         lapdepth_model = lapdepth_model.to(device)
 
-    if (config.eval.compareResult and config.eval.dataset =='transDepth') or config.eval.lapdepth.should_validate:
+    if (config.eval.compareResult and config.eval.dataset =='transDepth') or config.eval.newcrf.should_validate:
         from models.NewCRFDepth.NewCRFDepth import NewCRFDepth
         newCRF_model = NewCRFDepth(version='large07', inv_depth=False, max_depth=config.eval.max_depth, pretrained=None)
         
@@ -329,11 +328,32 @@ if __name__ == '__main__':
         
         # Enable Multi-GPU training
         if torch.cuda.device_count() > 1:
-            newCRF_model = nn.DataParallel(lapdepth_model)
+            newCRF_model = nn.DataParallel(newCRF_model)
         newCRF_model = newCRF_model.to(device)
+
+    if (config.eval.compareResult and config.eval.dataset =='transDepth') or config.eval.depthformer.should_validate:
+        from depth.models import build_depther
+        import mmcv
+        cfg = mmcv.Config.fromfile(config.eval.depthformer.modelPath)
+        depthformer_model = build_depther(
+        cfg.model,
+        train_cfg=None,
+        test_cfg=None)
+        #model.init_weights()
+        del cfg
         
+        if config.eval.loadProjektCheckpoints:
+            _ , depthformer_model = model_io.load_checkpoint(
+            config.eval.depthformer.pathWeightsFile, depthformer_model)
+        else:
+            depthformer_model = model_io.load_origin_Checkpoint(config.eval.depthformer.pathWeightsFile, 'depthformer', depthformer_model)
+        
+        # Enable Multi-GPU training
+        if torch.cuda.device_count() > 1:
+            depthformer_model = nn.DataParallel(depthformer_model)
+        depthformer_model = depthformer_model.to(device)
 
-
+    
     ###################### Eval #############################
 
     if config.eval.compareResult:
@@ -345,10 +365,10 @@ if __name__ == '__main__':
         field_names = create_csv(csv_filename, csv_dir)
 
         if config.eval.dataset  in ['clearGrasp','nyu']:
-            framework_eval.validateAll(adabin_model, densedepth_model, dpt_model, lapdepth_model, device, config, dataloaders_dict,
+            framework_eval.validateAll_old(adabin_model, densedepth_model, dpt_model, lapdepth_model, device, config, dataloaders_dict,
                                    field_names, csv_filename, csv_dir, results_dir, SUBDIR_IMG)
         else:
-            framework_eval.validateAll(dpt_model, newCRF_model, device, config, dataloaders_dict,
+            framework_eval.validateAll(dpt_model, depthformer_model, newCRF_model, device, config, dataloaders_dict,
                                    field_names, csv_filename, csv_dir, results_dir, SUBDIR_IMG)
     else:
         # else compare only the specified models
@@ -389,7 +409,7 @@ if __name__ == '__main__':
 
             field_names = create_csv(csv_filename, csv_dir)
 
-            framework_eval.validateLapDepth(lapdepth_model, device, config, dataloaders_dict,
+            framework_eval.validateFullResolutionModel("LapDepth",lapdepth_model, device, config, dataloaders_dict,
                                           field_names, csv_filename, csv_dir, results_dir, SUBDIR_IMG) 
                                         
         elif config.eval.newcrf.should_validate:
@@ -399,5 +419,5 @@ if __name__ == '__main__':
 
             field_names = create_csv(csv_filename, csv_dir)
 
-            framework_eval.validateNewCRF(newCRF_model, device, config, dataloaders_dict,
+            framework_eval.validateFullResolutionModel("NewCRF", newCRF_model, device, config, dataloaders_dict,
                                           field_names, csv_filename, csv_dir, results_dir, SUBDIR_IMG) 

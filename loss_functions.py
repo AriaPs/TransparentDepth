@@ -7,10 +7,10 @@ Note: This file is adapted from AdaBins and DenseDepth framework.
 
 import torch
 import torch.nn as nn
-import kornia
+#import kornia
 import numpy as np
-from pytorch3d.loss import chamfer_distance
-from torch.nn.utils.rnn import pad_sequence
+#from pytorch3d.loss import chamfer_distance
+#from torch.nn.utils.rnn import pad_sequence
 
 
 
@@ -46,22 +46,22 @@ class SILogLoss(nn.Module):  # Main loss function used in AdaBins paper
 Taken from Python implematation of AdaBins 
 --> Computes chamfer loss for the AdaBins module output and ground truth provided as tensors. 
 """
-class BinsChamferLoss(nn.Module):  # Bin centers regularizer used in AdaBins paper
-    def __init__(self):
-        super().__init__()
-        self.name = "ChamferLoss"
-    def forward(self, bins, target_depth_maps):
-        bin_centers = 0.5 * (bins[:, 1:] + bins[:, :-1])
-        n, p = bin_centers.shape
-        input_points = bin_centers.view(n, p, 1)  # .shape = n, p, 1
-       # n, c, h, w = target_depth_maps.shape
-        target_points = target_depth_maps.flatten(1)  # n, hwc
-        mask = target_points.ge(1e-3)  # only valid ground truth points
-        target_points = [p[m] for p, m in zip(target_points, mask)]
-        target_lengths = torch.Tensor([len(t) for t in target_points]).long().to(target_depth_maps.device)
-        target_points = pad_sequence(target_points, batch_first=True).unsqueeze(2)  # .shape = n, T, 1
-        loss, _ = chamfer_distance(x=input_points, y=target_points, y_lengths=target_lengths)
-        return loss
+#class BinsChamferLoss(nn.Module):  # Bin centers regularizer used in AdaBins paper
+#    def __init__(self):
+#        super().__init__()
+#        self.name = "ChamferLoss"
+#    def forward(self, bins, target_depth_maps):
+#        bin_centers = 0.5 * (bins[:, 1:] + bins[:, :-1])
+#        n, p = bin_centers.shape
+#        input_points = bin_centers.view(n, p, 1)  # .shape = n, p, 1
+#       # n, c, h, w = target_depth_maps.shape
+#        target_points = target_depth_maps.flatten(1)  # n, hwc
+#        mask = target_points.ge(1e-3)  # only valid ground truth points
+#        target_points = [p[m] for p, m in zip(target_points, mask)]
+#        target_lengths = torch.Tensor([len(t) for t in target_points]).long().to(target_depth_maps.device)
+#        target_points = pad_sequence(target_points, batch_first=True).unsqueeze(2)  # .shape = n, T, 1
+#        loss, _ = chamfer_distance(x=input_points, y=target_points, y_lengths=target_lengths)
+#        return loss
 
 
 """
@@ -70,19 +70,19 @@ Adapted from Python implematation of DenseDepth
  to ground truth size if [interpolate] is true
 
 """
-def ssim(model_output, gt_vec, interpolate=True):
-    if interpolate:
-        model_output = nn.functional.interpolate(model_output, gt_vec.shape[-2:], mode='bilinear', align_corners=True)
-    # calculate loss only on valid pixels
-    mask_invalid_pixels = torch.all(gt_vec <= 0)
-    gt_vec[mask_invalid_pixels] = 0.0
-    model_output[mask_invalid_pixels] = 0.0
-    criterion = nn.L1Loss()
-    l_depth = criterion(model_output, gt_vec)
-    ssim = kornia.losses.SSIM(window_size=11,max_val=1.5/0.1)
-    l_ssim = torch.clamp((1 - ssim(model_output, gt_vec)) * 0.5, 0, 1)
-    loss = (1.0 * l_ssim.mean().item()) + (0.1 * l_depth)
-    return loss
+#def ssim(model_output, gt_vec, interpolate=True):
+#    if interpolate:
+#        model_output = nn.functional.interpolate(model_output, gt_vec.shape[-2:], mode='bilinear', align_corners=True)
+#    # calculate loss only on valid pixels
+#    mask_invalid_pixels = torch.all(gt_vec <= 0)
+#    gt_vec[mask_invalid_pixels] = 0.0
+#    model_output[mask_invalid_pixels] = 0.0
+#    criterion = nn.L1Loss()
+#    l_depth = criterion(model_output, gt_vec)
+#    ssim = kornia.losses.SSIM(window_size=11,max_val=1.5/0.1)
+#    l_ssim = torch.clamp((1 - ssim(model_output, gt_vec)) * 0.5, 0, 1)
+#    loss = (1.0 * l_ssim.mean().item()) + (0.1 * l_depth)
+#    return loss
 
 
 

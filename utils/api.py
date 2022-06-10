@@ -129,7 +129,7 @@ def save_uint16_png(path, image):
     img.save(path)
 
 
-def _normalize_depth_img(depth_img, dtype=np.uint8, min_depth=0.0, max_depth=1.5):
+def _normalize_depth_img(depth_img, dtype=np.uint8, min_depth=0.0, max_depth=2.5):
     '''Converts a floating point depth image to uint8 or uint16 image.
     The depth image is first scaled to (0.0, max_depth) and then scaled and converted to given datatype.
 
@@ -166,7 +166,7 @@ def _normalize_depth_img(depth_img, dtype=np.uint8, min_depth=0.0, max_depth=1.5
     return depth_img
 
 
-def depth2rgb(depth_img, min_depth=0.0, max_depth=1.5, color_mode=cv2.COLORMAP_JET, reverse_scale=False,
+def depth2rgb(depth_img, min_depth=0.0, max_depth=2.5, color_mode=cv2.COLORMAP_JET, reverse_scale=False,
               dynamic_scaling=False):
     '''Generates RGB representation of a depth image.
     To do so, the depth image has to be normalized by specifying a min and max depth to be considered.
@@ -211,7 +211,7 @@ def depth2rgb(depth_img, min_depth=0.0, max_depth=1.5, color_mode=cv2.COLORMAP_J
     return depth_img_mapped
 
 
-def depthTensor2rgbTensor(depth_img, min_depth=0.0, max_depth=1.5, color_mode=cv2.COLORMAP_JET, reverse_scale=False,
+def depthTensor2rgbTensor(depth_img, min_depth=0.0, max_depth=2.5, color_mode=cv2.COLORMAP_JET, reverse_scale=False,
               dynamic_scaling=False):
     '''Generates RGB representation of each depth images from a batch tensor.
     To do so, the depth image has to be normalized by specifying a min and max depth to be considered.

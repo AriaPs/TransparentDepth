@@ -370,8 +370,18 @@ def train(gpu, config, writer):
                 'max_depth': config.train.max_depth,
             })
     elif config.train.model == 'newcrf':
-        from models.NewCRFDepth.NewCRFDepth import NewCRFDepth
+        from models.NewCRFDepth.NewCRFDepth import NewCRFDepth 
         model = NewCRFDepth(version='large07', inv_depth=False, max_depth=config.train.max_depth, pretrained=None)
+    elif config.train.model == 'depthformer':
+        from depth.models import build_depther
+        import mmcv
+        cfg = mmcv.Config.fromfile(config.train.depthformer.modelPath)
+        model = build_depther(
+        cfg.model,
+        train_cfg=None,
+        test_cfg=None)
+        model.init_weights()
+        del cfg
     else:
         raise ValueError(
             'Invalid model "{}" in config file. Must be one of ["densedepth", "adabin", "dpt"]'
@@ -446,12 +456,14 @@ def train(gpu, config, writer):
     if (config.train.continueTraining and config.train.loadEpochNumberFromCheckpoint):
         total_iter_num = CHECKPOINT['total_iter_num'] + 1
         START_EPOCH = CHECKPOINT['epoch'] 
-        END_EPOCH = config.train.numEpochs
+        if CHECKPOINT['epoch'] == config.train.numEpochs:
+            END_EPOCH = config.train.numEpochs + 1
+
         #if config.train.lrScheduler == 'OneCycleLR':
         #    lr_scheduler.step(START_EPOCH)
 
-    framework_train.trainDenseDepth(config.train.model, writer, device, model, trainLoader, syntheticValidationLoader, realValidationLoader, optimizer,criterion,  lr_scheduler, START_EPOCH,
-                                  END_EPOCH, total_iter_num, config.train.validateModelInterval, CHECKPOINT_DIR, config_yaml)
+    framework_train.train(config.train.model, writer, device, model, trainLoader, syntheticValidationLoader, realValidationLoader, optimizer,criterion,  lr_scheduler, START_EPOCH,
+                                  END_EPOCH, total_iter_num, config.train.validateModelInterval, CHECKPOINT_DIR, config_yaml, config)
     
 
 

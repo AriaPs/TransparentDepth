@@ -27,7 +27,7 @@ from utils.api import depth2rgb, exr_saver
 import loss_functions
 
 
-def validateAll(model_dpt, newCRF_model, device, config, dataloaders_dict, field_names, csv_filename, csv_dir, results_dir, SUBDIR_IMG):
+def validateAll(model_dpt, depthformer_model, newCRF_model, device, config, dataloaders_dict, field_names, csv_filename, csv_dir, results_dir, SUBDIR_IMG):
     '''Computes the standard evaluation metrics for [model_adabin], [model_densedepth], [model_dpt] from inputs taken of data set 
     listed in [dataloaders_dict] and saves it in the csv file [csv_filename].
     The results are saved in [results_dir] and the images in [results_dir]/[SUBDIR_IMG].
@@ -48,7 +48,9 @@ def validateAll(model_dpt, newCRF_model, device, config, dataloaders_dict, field
 
     model_dpt.eval()
     newCRF_model.eval()
+    depthformer_model.eval()
     criterion =loss_functions.SILogLoss()
+    metas = getMeta()
     #criterion_ssim = loss_functions.ssim
 
     ### Run Validation and Test Set ###
@@ -66,6 +68,11 @@ def validateAll(model_dpt, newCRF_model, device, config, dataloaders_dict, field
         metric_dpt_masked = createMetricDict()
         metric_dpt_masked_opaque = createMetricDict()
 
+        running_loss_depthformer = 0.0
+        metric_depthformer = createMetricDict()
+        metric_depthformer_masked = createMetricDict()
+        metric_depthformer_masked_opaque = createMetricDict()
+
         running_loss_newcrf = 0.0
         metric_newcrf = createMetricDict()
         metric_newcrf_masked = createMetricDict()
@@ -81,8 +88,13 @@ def validateAll(model_dpt, newCRF_model, device, config, dataloaders_dict, field
             # Forward pass of the mini-batch
             with torch.no_grad():
                 input = inputs.to(device)
-                _ , model_output_newcrf = newCRF_model(input)
+                model_output_newcrf = newCRF_model(input)
                 model_output_dpt = model_dpt(input)
+                depthformer_model_result = depthformer_model(return_loss=True, depth_gt=depths, img=input, img_metas=metas)
+            
+                #loss_depthformer = depthformer_model_result['decode.loss_depth']
+                model_output_depthformer = depthformer_model_result['decode.depth_pred']
+
                 # [BXHXW] --> [BX1XHXW]
                 model_output_dpt = torch.unsqueeze(model_output_dpt, 1)
 
@@ -91,28 +103,37 @@ def validateAll(model_dpt, newCRF_model, device, config, dataloaders_dict, field
             loss_newcrf = criterion(model_output_newcrf, depths, mask=mask, interpolate= False)
             running_loss_newcrf += loss_newcrf.item()
 
+            loss_depthformer = criterion(model_output_depthformer, depths, mask=mask)
+            running_loss_depthformer += loss_depthformer.item()
+
             loss_dpt = criterion(model_output_dpt, depths, mask=mask, interpolate= False)
             running_loss_dpt += loss_dpt.item()
+
+            model_output_depthformer = resize_pred(model_output_depthformer, depths.shape[-2:], config)
 
             # Save output images, one at a time, to results
             img_tensor = inputs.detach()
             output_tensor_dpt = model_output_dpt.detach().cpu()
+            output_tensor_depthformer = model_output_depthformer.detach().cpu()
             output_tensor_newcrf = model_output_newcrf.detach().cpu()
             depth_tensor = depths.detach().cpu()
             mask_tensor = mask.detach().cpu()
 
             # Extract each tensor within batch and save results
-            for iii, sample_batched in enumerate(zip(img_tensor, output_tensor_dpt, output_tensor_newcrf, depth_tensor, mask_tensor)):
-                img, output_dpt, output_newcrf, gt, mask = sample_batched
+            for iii, sample_batched in enumerate(zip(img_tensor, output_tensor_dpt, output_tensor_depthformer, output_tensor_newcrf, depth_tensor, mask_tensor)):
+                img, output_dpt, output_depthformer, output_newcrf, gt, mask = sample_batched
                 
                 # Calc metrics
                 metric_dpt, batch_metric_dpt = update_metric(metric_dpt, output_dpt, gt, config.eval.dataset)
+                metric_depthformer, batch_metric_depthformer = update_metric(metric_depthformer, output_depthformer, gt, config.eval.dataset)
                 metric_newcrf, batch_metric_newcrf = update_metric(metric_newcrf, output_newcrf, gt, config.eval.dataset)
 
                 metric_dpt_masked, batch_metric_dpt_masked = update_metric(metric_dpt_masked, output_dpt, gt, config.eval.dataset, mask=mask)
+                metric_depthformer_masked, batch_metric_depthformer_masked = update_metric(metric_depthformer_masked, output_depthformer, gt, config.eval.dataset, mask=mask)
                 metric_newcrf_masked, batch_metric_newcrf_masked = update_metric(metric_newcrf_masked, output_newcrf, gt, config.eval.dataset, mask=mask)
 
                 metric_dpt_masked_opaque, batch_metric_dpt_masked_opaque = update_metric(metric_dpt_masked_opaque, output_dpt, gt, config.eval.dataset, mask=mask, maskOpaques=False)
+                metric_depthformer_masked_opaque, batch_metric_depthformer_masked_opaque = update_metric(metric_depthformer_masked_opaque, output_depthformer, gt, config.eval.dataset, mask=mask, maskOpaques=False)
                 metric_newcrf_masked_opaque, batch_metric_newcrf_masked_opaque = update_metric(metric_newcrf_masked_opaque, output_newcrf, gt, config.eval.dataset, mask=mask, maskOpaques=False)
 
                 # Write the data into a csv file
@@ -122,6 +143,12 @@ def validateAll(model_dpt, newCRF_model, device, config, dataloaders_dict, field
                               csv_dir, field_names, csv_filename, ii, iii)
                 write_csv_row("DPT masked: Opaque", config.eval.batchSize, batch_metric_dpt_masked_opaque,
                               csv_dir, field_names, csv_filename, ii, iii)
+                write_csv_row("DepthFormer", config.eval.batchSize, batch_metric_depthformer,
+                              csv_dir, field_names, csv_filename, ii, iii)
+                write_csv_row("DepthFormer masked: Trans", config.eval.batchSize, batch_metric_depthformer_masked,
+                              csv_dir, field_names, csv_filename, ii, iii)
+                write_csv_row("DepthFormer masked: Opaque", config.eval.batchSize, batch_metric_depthformer_masked_opaque,
+                              csv_dir, field_names, csv_filename, ii, iii)
                 write_csv_row("NewCRF", config.eval.batchSize, batch_metric_newcrf,
                               csv_dir, field_names, csv_filename, ii, iii)
                 write_csv_row("NewCRF masked: Trans", config.eval.batchSize, batch_metric_newcrf_masked,
@@ -130,7 +157,7 @@ def validateAll(model_dpt, newCRF_model, device, config, dataloaders_dict, field
                               csv_dir, field_names, csv_filename, ii, iii)
 
                 if config.eval.saveCompareImage:
-                    save_compare_images(img, output_dpt, output_newcrf,
+                    save_compare_images(img, output_dpt, output_depthformer, output_newcrf,
                                     gt, config, results_dir, SUBDIR_IMG, ii, iii, key)
 
         num_batches = len(testLoader)  # Num of batches
@@ -138,17 +165,22 @@ def validateAll(model_dpt, newCRF_model, device, config, dataloaders_dict, field
         print('\nnum_batches:', num_batches)
         print('num_images:', num_images)
         epoch_loss_dpt = running_loss_dpt / num_batches
+        epoch_loss_depthformer = running_loss_depthformer / num_batches
         epoch_loss_newcrf = running_loss_newcrf / num_batches
         print('Test Mean Loss DPT: {:.4f} \n'.format(epoch_loss_dpt))
+        print('Test Mean Loss DepthFormer: {:.4f} \n'.format(epoch_loss_dpt))
         print('Test Mean Loss newcrf: {:.4f} \n'.format(epoch_loss_newcrf))
 
         print_means(metric_dpt, num_images, "DPT", csv_dir, csv_filename, field_names)
+        print_means(metric_depthformer, num_images, "DepthFormer", csv_dir, csv_filename, field_names)
         print_means(metric_newcrf, num_images, "NewCRF", csv_dir, csv_filename, field_names)
 
         print_means(metric_dpt_masked, num_images, "DPT masked: Trans", csv_dir, csv_filename, field_names)
+        print_means(metric_depthformer_masked, num_images, "DepthFormer masked: Trans", csv_dir, csv_filename, field_names)
         print_means(metric_newcrf_masked, num_images, "NewCRF masked: Trans", csv_dir, csv_filename, field_names)
 
         print_means(metric_dpt_masked_opaque, num_images, "DPT masked: Opaque", csv_dir, csv_filename, field_names)
+        print_means(metric_depthformer_masked_opaque, num_images, "DepthFormer masked: Opaque", csv_dir, csv_filename, field_names)
         print_means(metric_newcrf_masked_opaque, num_images, "NewCRF masked: Opaque", csv_dir, csv_filename, field_names)
 
 def validateAll_old(model_adabin, model_densedepth, model_dpt, model_lapdepth, device, config, dataloaders_dict, field_names, csv_filename, csv_dir, results_dir, SUBDIR_IMG):
@@ -494,7 +526,7 @@ def validateDenseDepht(model, device, config, dataloaders_dict, field_names, csv
 
         print_means(metric_densedepth, num_images, "DenseDepth", csv_dir, csv_filename, field_names)
 
-def validateLapDepth(model, device, config, dataloaders_dict, field_names, csv_filename, csv_dir, results_dir, SUBDIR_IMG):
+def validateFullResolutionModel(modelName, model, device, config, dataloaders_dict, field_names, csv_filename, csv_dir, results_dir, SUBDIR_IMG):
     '''Computes the standard evaluation metrics for [model] from inputs taken of data set 
     listed in [dataloaders_dict] and saves it in the csv file [csv_filename].
     The results are saved in [results_dir] and the images in [results_dir]/[SUBDIR_IMG].
@@ -516,23 +548,25 @@ def validateLapDepth(model, device, config, dataloaders_dict, field_names, csv_f
     criterion = loss_functions.ssim
 
     ### Run Validation and Test Set ###
-    print('\nValidation - LapDepth Model')
+    print('\nValidation - ', modelName, ' Model')
     print('-' * 50 + '\n')
     print(colored('Results will be saved to: {}\n'.format(
         config.eval.resultsDir), 'green'))
 
     for key in dataloaders_dict:
-        print('Running LapDepth on {} dataset:'.format(key))
+        print('Running ',modelName,' on {} dataset:'.format(key))
         print('=' * 30)
 
         running_loss = 0.0
         
-        metric_lapdepth = createMetricDict()
+        metric = createMetricDict()
+        metric_masked = createMetricDict()
+        metric_masked_opaque = createMetricDict()
 
         testLoader = dataloaders_dict[key]
         for ii, sample_batched in enumerate(tqdm(testLoader)):
 
-            inputs, depths = sample_batched
+            inputs, mask, depths = sample_batched
             
             # Forward pass of the mini-batch
             with torch.no_grad():
@@ -541,8 +575,7 @@ def validateLapDepth(model, device, config, dataloaders_dict, field_names, csv_f
             loss = criterion(model_output, depths.to(device))
             running_loss += loss.item()
 
-            model_output = resize_pred(model_output, depths.shape[-2:], config)
-
+            
             # Save output images, one at a time, to results
             img_tensor = inputs.detach()
             output_tensor = model_output.detach().cpu()
@@ -553,10 +586,16 @@ def validateLapDepth(model, device, config, dataloaders_dict, field_names, csv_f
                 img, output, gt = sample_batched
                 
                 # Calc metrics
-                metric_lapdepth, batch_metric_lapdepth = update_metric(metric_lapdepth, output, gt, config.eval.dataset)
+                metric, batch_metric = update_metric(metric, output, gt, config.eval.dataset)
+                metric_masked, batch_metric_masked = update_metric(metric_masked, output, gt, config.eval.dataset, mask=mask)
+                metric_masked_opaque, batch_metric_masked_opaque = update_metric(metric_masked_opaque, output, gt, config.eval.dataset, mask=mask, maskOpaques=False)
 
                 # Write the data into a csv file
-                write_csv_row("LapDepth", config.eval.batchSize, batch_metric_lapdepth,
+                write_csv_row(modelName, config.eval.batchSize, batch_metric,
+                              csv_dir, field_names, csv_filename, ii, iii)
+                write_csv_row("masked: Trans", config.eval.batchSize, batch_metric_masked,
+                              csv_dir, field_names, csv_filename, ii, iii)
+                write_csv_row("masked: Opaque", config.eval.batchSize, batch_metric_masked_opaque,
                               csv_dir, field_names, csv_filename, ii, iii)
 
                 if config.eval.lapdepth.saveImgae:
@@ -570,9 +609,9 @@ def validateLapDepth(model, device, config, dataloaders_dict, field_names, csv_f
         epoch_loss = running_loss / num_batches
         print('Test Mean Loss: {:.4f}'.format(epoch_loss))
 
-        print_means(metric_lapdepth, num_images, "LapDepth", csv_dir, csv_filename, field_names)
-
-
+        print_means(metric, num_images, modelName, csv_dir, csv_filename, field_names)
+        print_means(metric_masked, num_images, "masked: Trans", csv_dir, csv_filename, field_names)
+        print_means(metric_masked_opaque, num_images, "masked: Opaque", csv_dir, csv_filename, field_names)
 
 def validateDPT(model, device, config, dataloaders_dict, field_names, csv_filename, csv_dir, results_dir, SUBDIR_IMG):
     '''Computes the standard evaluation metrics for [model] from inputs taken of data set 
@@ -781,7 +820,7 @@ def save_images(input_image, output, gt, config, results_dir, SUBDIR_IMG, dataLo
     grid_image = np.concatenate((img_rgb, gt_rgb, output_rgb), 1)
     imageio.imwrite(gt_output_path_rgb, grid_image)
 
-def save_compare_images(input_image, output_dpt, output_newcrf, gt, config, results_dir, SUBDIR_IMG, dataLoader_index, batch_index, set_name, norm=5):
+def save_compare_images(input_image, output_dpt, output_depthformer, output_newcrf, gt, config, results_dir, SUBDIR_IMG, dataLoader_index, batch_index, set_name, norm=5):
     '''Generates for  [input_image], [gt], [output_densedepth], [output_adabin], and [output_dpt] a grid image having their depth map visualizations and 
     saves it in  [results_dir]/[SUBDIR_IMG].
 
@@ -807,6 +846,10 @@ def save_compare_images(input_image, output_dpt, output_newcrf, gt, config, resu
     output_rgb_dpt = cv2.resize(
         output_rgb_dpt, size, interpolation=cv2.INTER_LINEAR)
 
+    output_rgb_output_depthformer = depth2rgb(output_depthformer[0])
+    output_rgb_output_depthformer = cv2.resize(
+        output_rgb_output_depthformer, size, interpolation=cv2.INTER_LINEAR)
+
     output_rgb_newcrf = depth2rgb(output_newcrf[0])
     output_rgb_newcrf = cv2.resize(
         output_rgb_newcrf, size, interpolation=cv2.INTER_LINEAR)
@@ -826,7 +869,7 @@ def save_compare_images(input_image, output_dpt, output_newcrf, gt, config, resu
                                        '{:09d}-{}-img-gt-outputs.png'.format(name_prefix, set_name))
 
     grid_image = np.concatenate(
-        (img, gt_rgb, output_rgb_dpt, output_rgb_newcrf), 1)
+        (img, gt_rgb, output_rgb_dpt, output_rgb_output_depthformer, output_rgb_newcrf), 1)
 
     imageio.imwrite(img_gt_output_paths_rgb, grid_image)
 
@@ -837,6 +880,10 @@ def save_compare_images(input_image, output_dpt, output_newcrf, gt, config, resu
         output_rgb_dpt_normed = cv2.resize(
             output_rgb_dpt_normed, size, interpolation=cv2.INTER_LINEAR)
 
+        output_depthformer_normed = torch.nn.functional.normalize(output_depthformer[0]) * norm
+        output_rgb_depthformer_normed = depth2rgb(output_depthformer_normed)
+        output_rgb_depthformer_normed = cv2.resize(
+            output_rgb_depthformer_normed, size, interpolation=cv2.INTER_LINEAR)
 
         output_newcrf_normed = torch.nn.functional.normalize(output_newcrf[0]) * norm
         output_rgb_newcrf_normed = depth2rgb(output_newcrf_normed)
@@ -850,7 +897,7 @@ def save_compare_images(input_image, output_dpt, output_newcrf, gt, config, resu
         gt_rgb = cv2.resize(gt_rgb, size, interpolation=cv2.INTER_LINEAR)
 
         grid_image = np.concatenate(
-            (img, gt_rgb, output_rgb_dpt_normed, output_rgb_newcrf_normed), 1)
+            (img, gt_rgb, output_rgb_dpt_normed, output_rgb_depthformer_normed, output_rgb_newcrf_normed), 1)
 
         imageio.imwrite(img_gt_output_paths_rgb, grid_image)
 
@@ -868,6 +915,16 @@ def save_compare_images(input_image, output_dpt, output_newcrf, gt, config, resu
                                            '{:09d}-{}-depth-newcrf.exr'.format(name_prefix, set_name))
                                            
         exr_saver(save_path_exr, output_newcrf[0].numpy())
+
+        save_path_exr = os.path.join(results_dir, SUBDIR_IMG,
+                                           '{:09d}-{}-depth-depthformer-normed.exr'.format(name_prefix, set_name))
+    
+        exr_saver(save_path_exr, output_depthformer_normed.numpy())
+    
+        save_path_exr = os.path.join(results_dir, SUBDIR_IMG,
+                                           '{:09d}-{}-depth-depthformer.exr'.format(name_prefix, set_name))
+                                           
+        exr_saver(save_path_exr, output_depthformer[0].numpy())
     
         save_path_exr = os.path.join(results_dir, SUBDIR_IMG,
                                            '{:09d}-{}-depth-dpt-normed.exr'.format(name_prefix, set_name))
@@ -1065,6 +1122,20 @@ def resize_pred(pred, gt_shape, config):
     pred = nn.functional.interpolate(pred, gt_shape, mode='bilinear', align_corners=True)
     pred = torch.clamp(pred, config.eval.min_depth, config.eval.max_depth)
     return pred
+
+def getMeta():
+    results = dict(img=None)
+    results['filename'] = None
+    results['ori_filename'] = None
+    results['pad_shape'] = None
+    results['scale_factor'] = None
+    results['flip'] = None
+    results['flip_direction'] = None
+    results['img_norm_cfg'] = dict(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225], to_rgb=True)
+    results['cam_intrinsic'] = None
+    results['img_shape'] = (512,512,3)
+    results['ori_shape'] = (512,512,3)
+    return results
 
 def resize_tensor(input_tensor, height, width):
     '''Resize the [input_tensor] to the given [height] and [width].

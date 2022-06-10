@@ -4,7 +4,7 @@ import os
 import numpy as np
 import torch
 from termcolor import colored
-import tensorflow as tf
+#import tensorflow as tf
 
 
 def save_model(CHECKPOINT_DIR, epoch, model, optimizer, total_iter_num, epoch_loss, config_yaml, name):
@@ -63,63 +63,63 @@ def load_origin_Checkpoint(pathWeightsFile, model_name, model):
 
     if model_name == 'densedepth':
         # Load model into GPU / CPU
-        custom_objects = {
-            'BilinearUpSampling2D': tf.keras.layers.UpSampling2D, 'depth_loss_function': None}
-        model_tf = tf.keras.models.load_model(
-            pathWeightsFile, custom_objects=custom_objects, compile=False)
-        names = [weight.name for layer in model_tf.layers for weight in layer.weights]
-        weights = model_tf.get_weights()
-
-        keras_name = []
-        for name, weight in zip(names, weights):
-          keras_name.append(name)
-
-        model = model.float()
-
-        # load parameter from keras
-        keras_state_dict = {} 
-        j = 0
-        for name, param in model.named_parameters():
-        
-          if 'classifier' in name:
-            keras_state_dict[name]=param
-            continue
-        
-          if 'conv' in name and 'weight' in name:
-            keras_state_dict[name]=torch.from_numpy(np.transpose(weights[j],(3, 2, 0, 1)))
-            # print(name,keras_name[j])
-            j = j+1
-            continue
-        
-          if 'conv' in name and 'bias' in name:
-            keras_state_dict[name]=torch.from_numpy(weights[j])
-            # print(param.shape,weights[j].size)
-            j = j+1
-            continue
-        
-          if 'norm' in name and 'weight' in name:
-            keras_state_dict[name]=torch.from_numpy(weights[j])
-            # print(param.shape,weights[j].shape)
-            j = j+1
-            continue
-        
-          if 'norm' in name and 'bias' in name:
-            keras_state_dict[name]=torch.from_numpy(weights[j])
-            # print(param.shape,weights[j].size)
-            j = j+1
-            keras_state_dict[name.replace("bias", "running_mean")]=torch.from_numpy(weights[j])
-            # print(param.shape,weights[j].size)
-            j = j+1
-            keras_state_dict[name.replace("bias", "running_var")]=torch.from_numpy(weights[j])
-            # print(param.shape,weights[j].size)
-            j = j+1
-            continue
-
-
-        model.load_state_dict(keras_state_dict)
-        del keras_state_dict
-        del model_tf
-
+        #custom_objects = {
+        #    'BilinearUpSampling2D': tf.keras.layers.UpSampling2D, 'depth_loss_function': None}
+        #model_tf = tf.keras.models.load_model(
+        #    pathWeightsFile, custom_objects=custom_objects, compile=False)
+        #names = [weight.name for layer in model_tf.layers for weight in layer.weights]
+        #weights = model_tf.get_weights()
+#
+        #keras_name = []
+        #for name, weight in zip(names, weights):
+        #  keras_name.append(name)
+#
+        #model = model.float()
+#
+        ## load parameter from keras
+        #keras_state_dict = {} 
+        #j = 0
+        #for name, param in model.named_parameters():
+        #
+        #  if 'classifier' in name:
+        #    keras_state_dict[name]=param
+        #    continue
+        #
+        #  if 'conv' in name and 'weight' in name:
+        #    keras_state_dict[name]=torch.from_numpy(np.transpose(weights[j],(3, 2, 0, 1)))
+        #    # print(name,keras_name[j])
+        #    j = j+1
+        #    continue
+        #
+        #  if 'conv' in name and 'bias' in name:
+        #    keras_state_dict[name]=torch.from_numpy(weights[j])
+        #    # print(param.shape,weights[j].size)
+        #    j = j+1
+        #    continue
+        #
+        #  if 'norm' in name and 'weight' in name:
+        #    keras_state_dict[name]=torch.from_numpy(weights[j])
+        #    # print(param.shape,weights[j].shape)
+        #    j = j+1
+        #    continue
+        #
+        #  if 'norm' in name and 'bias' in name:
+        #    keras_state_dict[name]=torch.from_numpy(weights[j])
+        #    # print(param.shape,weights[j].size)
+        #    j = j+1
+        #    keras_state_dict[name.replace("bias", "running_mean")]=torch.from_numpy(weights[j])
+        #    # print(param.shape,weights[j].size)
+        #    j = j+1
+        #    keras_state_dict[name.replace("bias", "running_var")]=torch.from_numpy(weights[j])
+        #    # print(param.shape,weights[j].size)
+        #    j = j+1
+        #    continue
+#
+#
+        #model.load_state_dict(keras_state_dict)
+        #del keras_state_dict
+        #del model_tf
+        print("")
         #custom_objects = {
         #    'BilinearUpSampling2D': tf.keras.layers.UpSampling2D, 'depth_loss_function': None}
         #model_tf = tf.keras.models.load_model(
@@ -194,6 +194,18 @@ def load_origin_Checkpoint(pathWeightsFile, model_name, model):
         CHECKPOINT = torch.load(pathWeightsFile, map_location='cpu')
         load_dict = {}
         model_state = CHECKPOINT['model']
+        for k, v in model_state.items():
+            if k.startswith('module.'):
+                k_ = k[7:]
+                load_dict[k_] = v
+            else:
+                load_dict[k] = v
+        model.load_state_dict(load_dict)
+        del model_state
+    elif model_name == 'depthformer':
+        CHECKPOINT = torch.load(pathWeightsFile, map_location='cpu')
+        load_dict = {}
+        model_state = CHECKPOINT['state_dict']
         for k, v in model_state.items():
             if k.startswith('module.'):
                 k_ = k[7:]
