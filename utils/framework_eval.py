@@ -67,21 +67,27 @@ def validateAll(model_dpt, depthformer_model, newCRF_model, device, config, data
         metric_dpt = createMetricDict()
         metric_dpt_masked = createMetricDict()
         metric_dpt_masked_opaque = createMetricDict()
+        metric_dpt_masked_forground = createMetricDict()
+        metric_dpt_masked_background = createMetricDict()
 
         running_loss_depthformer = 0.0
         metric_depthformer = createMetricDict()
         metric_depthformer_masked = createMetricDict()
         metric_depthformer_masked_opaque = createMetricDict()
+        metric_depthformer_masked_forground = createMetricDict()
+        metric_depthformer_masked_background = createMetricDict()
 
         running_loss_newcrf = 0.0
         metric_newcrf = createMetricDict()
         metric_newcrf_masked = createMetricDict()
         metric_newcrf_masked_opaque = createMetricDict()
+        metric_newcrf_masked_forground = createMetricDict()
+        metric_newcrf_masked_background = createMetricDict()
 
         testLoader = dataloaders_dict[key]
         for ii, sample_batched in enumerate(tqdm(testLoader)):
 
-            inputs, mask, depths = sample_batched
+            inputs, mask, mask_forground, depths = sample_batched
 
             depths = depths.to(device)
 
@@ -118,10 +124,11 @@ def validateAll(model_dpt, depthformer_model, newCRF_model, device, config, data
             output_tensor_newcrf = model_output_newcrf.detach().cpu()
             depth_tensor = depths.detach().cpu()
             mask_tensor = mask.detach().cpu()
+            mask_forground_tensor = mask_forground.detach().cpu()
 
             # Extract each tensor within batch and save results
-            for iii, sample_batched in enumerate(zip(img_tensor, output_tensor_dpt, output_tensor_depthformer, output_tensor_newcrf, depth_tensor, mask_tensor)):
-                img, output_dpt, output_depthformer, output_newcrf, gt, mask = sample_batched
+            for iii, sample_batched in enumerate(zip(img_tensor, output_tensor_dpt, output_tensor_depthformer, output_tensor_newcrf, depth_tensor, mask_tensor, mask_forground_tensor)):
+                img, output_dpt, output_depthformer, output_newcrf, gt, mask, mask_forground = sample_batched
                 
                 # Calc metrics
                 metric_dpt, batch_metric_dpt = update_metric(metric_dpt, output_dpt, gt, config.eval.dataset)
@@ -132,28 +139,52 @@ def validateAll(model_dpt, depthformer_model, newCRF_model, device, config, data
                 metric_depthformer_masked, batch_metric_depthformer_masked = update_metric(metric_depthformer_masked, output_depthformer, gt, config.eval.dataset, mask=mask)
                 metric_newcrf_masked, batch_metric_newcrf_masked = update_metric(metric_newcrf_masked, output_newcrf, gt, config.eval.dataset, mask=mask)
 
-                metric_dpt_masked_opaque, batch_metric_dpt_masked_opaque = update_metric(metric_dpt_masked_opaque, output_dpt, gt, config.eval.dataset, mask=mask, maskOpaques=False)
-                metric_depthformer_masked_opaque, batch_metric_depthformer_masked_opaque = update_metric(metric_depthformer_masked_opaque, output_depthformer, gt, config.eval.dataset, mask=mask, maskOpaques=False)
-                metric_newcrf_masked_opaque, batch_metric_newcrf_masked_opaque = update_metric(metric_newcrf_masked_opaque, output_newcrf, gt, config.eval.dataset, mask=mask, maskOpaques=False)
+                metric_dpt_masked_opaque, batch_metric_dpt_masked_opaque = update_metric(metric_dpt_masked_opaque, output_dpt, gt, config.eval.dataset, mask=mask, masksZeros=False)
+                metric_depthformer_masked_opaque, batch_metric_depthformer_masked_opaque = update_metric(metric_depthformer_masked_opaque, output_depthformer, gt, config.eval.dataset, mask=mask, masksZeros=False)
+                metric_newcrf_masked_opaque, batch_metric_newcrf_masked_opaque = update_metric(metric_newcrf_masked_opaque, output_newcrf, gt, config.eval.dataset, mask=mask, masksZeros=False)
+
+                metric_dpt_masked_forground, batch_metric_dpt_masked_forground = update_metric(metric_dpt_masked_forground, output_dpt, gt, config.eval.dataset, mask=mask_forground)
+                metric_depthformer_masked_forground, batch_metric_depthformer_masked_forground = update_metric(metric_depthformer_masked_forground, output_depthformer, gt, config.eval.dataset, mask=mask_forground)
+                metric_newcrf_masked_forground, batch_metric_newcrf_masked_forground = update_metric(metric_newcrf_masked_forground, output_newcrf, gt, config.eval.dataset, mask=mask_forground)
+
+                metric_dpt_masked_background, batch_metric_dpt_masked_background = update_metric(metric_dpt_masked_background, output_dpt, gt, config.eval.dataset, mask=mask_forground, masksZeros=False)
+                metric_depthformer_masked_background, batch_metric_depthformer_masked_background = update_metric(metric_depthformer_masked_background, output_depthformer, gt, config.eval.dataset, mask=mask_forground, masksZeros=False)
+                metric_newcrf_masked_background, batch_metric_newcrf_masked_background = update_metric(metric_newcrf_masked_background, output_newcrf, gt, config.eval.dataset, mask=mask_forground, masksZeros=False)
 
                 # Write the data into a csv file
                 write_csv_row("DPT", config.eval.batchSize, batch_metric_dpt,
                               csv_dir, field_names, csv_filename, ii, iii)
-                write_csv_row("DPT masked: Trans", config.eval.batchSize, batch_metric_dpt_masked,
-                              csv_dir, field_names, csv_filename, ii, iii)
-                write_csv_row("DPT masked: Opaque", config.eval.batchSize, batch_metric_dpt_masked_opaque,
-                              csv_dir, field_names, csv_filename, ii, iii)
                 write_csv_row("DepthFormer", config.eval.batchSize, batch_metric_depthformer,
-                              csv_dir, field_names, csv_filename, ii, iii)
-                write_csv_row("DepthFormer masked: Trans", config.eval.batchSize, batch_metric_depthformer_masked,
-                              csv_dir, field_names, csv_filename, ii, iii)
-                write_csv_row("DepthFormer masked: Opaque", config.eval.batchSize, batch_metric_depthformer_masked_opaque,
                               csv_dir, field_names, csv_filename, ii, iii)
                 write_csv_row("NewCRF", config.eval.batchSize, batch_metric_newcrf,
                               csv_dir, field_names, csv_filename, ii, iii)
+
+                write_csv_row("DPT masked: Trans", config.eval.batchSize, batch_metric_dpt_masked,
+                              csv_dir, field_names, csv_filename, ii, iii)
+                write_csv_row("DepthFormer masked: Trans", config.eval.batchSize, batch_metric_depthformer_masked,
+                              csv_dir, field_names, csv_filename, ii, iii)
                 write_csv_row("NewCRF masked: Trans", config.eval.batchSize, batch_metric_newcrf_masked,
                               csv_dir, field_names, csv_filename, ii, iii)
+
+                write_csv_row("DPT masked: Opaque", config.eval.batchSize, batch_metric_dpt_masked_opaque,
+                              csv_dir, field_names, csv_filename, ii, iii)
+                write_csv_row("DepthFormer masked: Opaque", config.eval.batchSize, batch_metric_depthformer_masked_opaque,
+                              csv_dir, field_names, csv_filename, ii, iii)
                 write_csv_row("NewCRF masked: Opaque", config.eval.batchSize, batch_metric_newcrf_masked_opaque,
+                              csv_dir, field_names, csv_filename, ii, iii)
+
+                write_csv_row("DPT masked: forground", config.eval.batchSize, batch_metric_dpt_masked_forground,
+                              csv_dir, field_names, csv_filename, ii, iii)
+                write_csv_row("DepthFormer masked: forground", config.eval.batchSize, batch_metric_depthformer_masked_forground,
+                              csv_dir, field_names, csv_filename, ii, iii)
+                write_csv_row("NewCRF masked: forground", config.eval.batchSize, batch_metric_newcrf_masked_forground,
+                              csv_dir, field_names, csv_filename, ii, iii)
+
+                write_csv_row("DPT masked: background", config.eval.batchSize, batch_metric_dpt_masked_background,
+                              csv_dir, field_names, csv_filename, ii, iii)
+                write_csv_row("DepthFormer masked: background", config.eval.batchSize, batch_metric_depthformer_masked_background,
+                              csv_dir, field_names, csv_filename, ii, iii)
+                write_csv_row("NewCRF masked: background", config.eval.batchSize, batch_metric_newcrf_masked_background,
                               csv_dir, field_names, csv_filename, ii, iii)
 
                 if config.eval.saveCompareImage:
@@ -168,7 +199,7 @@ def validateAll(model_dpt, depthformer_model, newCRF_model, device, config, data
         epoch_loss_depthformer = running_loss_depthformer / num_batches
         epoch_loss_newcrf = running_loss_newcrf / num_batches
         print('Test Mean Loss DPT: {:.4f} \n'.format(epoch_loss_dpt))
-        print('Test Mean Loss DepthFormer: {:.4f} \n'.format(epoch_loss_dpt))
+        print('Test Mean Loss DepthFormer: {:.4f} \n'.format(epoch_loss_depthformer))
         print('Test Mean Loss newcrf: {:.4f} \n'.format(epoch_loss_newcrf))
 
         print_means(metric_dpt, num_images, "DPT", csv_dir, csv_filename, field_names)
@@ -182,6 +213,14 @@ def validateAll(model_dpt, depthformer_model, newCRF_model, device, config, data
         print_means(metric_dpt_masked_opaque, num_images, "DPT masked: Opaque", csv_dir, csv_filename, field_names)
         print_means(metric_depthformer_masked_opaque, num_images, "DepthFormer masked: Opaque", csv_dir, csv_filename, field_names)
         print_means(metric_newcrf_masked_opaque, num_images, "NewCRF masked: Opaque", csv_dir, csv_filename, field_names)
+
+        print_means(metric_dpt_masked_forground, num_images, "DPT masked: forground", csv_dir, csv_filename, field_names)
+        print_means(metric_depthformer_masked_forground, num_images, "DepthFormer masked: forground", csv_dir, csv_filename, field_names)
+        print_means(metric_newcrf_masked_forground, num_images, "NewCRF masked: forground", csv_dir, csv_filename, field_names)
+
+        print_means(metric_dpt_masked_background, num_images, "DPT masked: background", csv_dir, csv_filename, field_names)
+        print_means(metric_depthformer_masked_background, num_images, "DepthFormer masked: background", csv_dir, csv_filename, field_names)
+        print_means(metric_newcrf_masked_background, num_images, "NewCRF masked: background", csv_dir, csv_filename, field_names)
 
 def validateAll_old(model_adabin, model_densedepth, model_dpt, model_lapdepth, device, config, dataloaders_dict, field_names, csv_filename, csv_dir, results_dir, SUBDIR_IMG):
     '''Computes the standard evaluation metrics for [model_adabin], [model_densedepth], [model_dpt] from inputs taken of data set 
@@ -757,7 +796,7 @@ def print_means(metric, num_images, model_name, results_dir, csv_filename, field
         .format(model_name, epoch_metric_a1, epoch_metric_a2, epoch_metric_a3, epoch_metric_abs_rel, epoch_metric_rmse,
                 epoch_metric_log_10, epoch_metric_rmse_log, epoch_metric_si_log, epoch_metric_sq_rel, num_images))
 
-def update_metric(metricDict, output, gt, dataset= "clearGrasp", mask=None, maskOpaques=True):
+def update_metric(metricDict, output, gt, dataset= "clearGrasp", mask=None, masksZeros=True):
     '''Computes the evaluation metrics for [output] and [gt] and updates [metricDict]. Finally, 
     it returns the updated [metricDict] and the computed metrics. 
 
@@ -770,7 +809,7 @@ def update_metric(metricDict, output, gt, dataset= "clearGrasp", mask=None, mask
             Dict(str, list of float): Updated dictionary having the evaluation metrics
             list of float: The computed metrics
     '''
-    metrics = loss_functions.compute_errors(gt, output, dataset=dataset, masks=mask, maskOpaques=maskOpaques)
+    metrics = loss_functions.compute_errors(gt, output, dataset=dataset, masks=mask, masksZeros=masksZeros)
     metricDict['metric_a1'] += metrics['a1']
     metricDict['metric_a2'] += metrics['a2']
     metricDict['metric_a3'] += metrics['a3']
