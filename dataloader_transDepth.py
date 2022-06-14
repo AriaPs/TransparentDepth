@@ -131,9 +131,13 @@ class TransDepthTransDepth(Dataset):
             _depth = np.expand_dims(_depth, axis=0)
             _depth = np.ascontiguousarray(_depth)
 
-            # Open input masks   
+            # Open input masks    
             _mask = np.array(f["class_segmaps"], dtype=np.float32)
             _mask = np.expand_dims(_mask, axis=0)
+
+            if self.mode=='test':
+                _mask_foreground = np.array(f["instance_segmaps"], dtype=np.float32)
+                _mask_foreground = np.expand_dims(_mask_foreground, axis=0)
 
             if self.mode=='train':
                 _img, _depth, _mask = self._train_preprocess(_img, _depth, _mask)
@@ -144,6 +148,10 @@ class TransDepthTransDepth(Dataset):
             _depth_tensor = torch.from_numpy(_depth)
 
             _mask_tensor = torch.from_numpy(_mask)
+
+            if self.mode=='test':
+                _mask_foreground = torch.from_numpy(_mask_foreground)
+                return _img_tensor, _mask_tensor, _mask_foreground, _depth_tensor
 
             return _img_tensor, _mask_tensor, _depth_tensor
 
@@ -221,8 +229,8 @@ if __name__ == '__main__':
     import torchvision
 
 
-    db_test = TransDepthTransDepth(input_dir='/gris/gris-f/homelv/ajamili/vc/setGen/output_test/',
-                                    mode='train')
+    db_test = TransDepthTransDepth(input_dir='/gris/gris-f/homelv/ajamili/DataSet/transDepth/test/',
+                                    mode='test')
 
     batch_size = 4
     testloader = DataLoader(db_test, batch_size=batch_size, shuffle=True, num_workers=1, drop_last=True)
@@ -230,9 +238,10 @@ if __name__ == '__main__':
     # Show 1 Shuffled Batch of Images
     for ii, batch in enumerate(testloader):
         # Get Batch
-        img, mask, depth = batch
+        img, mask, mask_forground, depth = batch
         print('image shape, type: ', img.shape, img.dtype)
         print('mask shape, type: ', mask.shape, mask.dtype)
+        print('mask_forground shape, type: ', mask_forground.shape, mask_forground.dtype)
         print('depth shape, type: ', depth.shape, depth.dtype)
 
         # Show Batch
