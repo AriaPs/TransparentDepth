@@ -175,9 +175,15 @@ def load_origin_Checkpoint(pathWeightsFile, model_name, model):
 
         model.load_state_dict(parameters)
         del parameters
+    elif model_name == 'glp':
+        from collections import OrderedDict
+        model_weight = torch.load(pathWeightsFile, map_location='cpu')
+        if 'module' in next(iter(model_weight.items()))[0]:
+            model_weight = OrderedDict((k[7:], v) for k, v in model_weight.items())
+        model.load_state_dict(model_weight)
+        del model_weight
     elif model_name == 'lapdepth':
-        model_state = torch.load(
-            pathWeightsFile, map_location='cpu')
+        model_state = torch.load(pathWeightsFile, map_location='cpu')
 
         load_dict = {}
         for k, v in model_state.items():
@@ -214,6 +220,12 @@ def load_origin_Checkpoint(pathWeightsFile, model_name, model):
                 load_dict[k] = v
         model.load_state_dict(load_dict)
         del model_state
+    elif model_name == 'binsformer':
+        from mmcv.runner import load_checkpoint
+        checkpoint = load_checkpoint(model, pathWeightsFile, map_location='cpu')
+        #print(checkpoint)
+        #model_state = checkpoint['state_dict']
+        #model.load_state_dict(model_state)
     else:
         raise ValueError('Invalid origin is given for transfer learning.\
                 The model {} is not supported'.format(model_name))

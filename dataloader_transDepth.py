@@ -35,9 +35,12 @@ def preprocessing_transforms(mode):
     ])
 
 class ToTensor(object):
+    def __init__(self):
+        self.normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
 
     def __call__(self, image):
         image = self.to_tensor(image)
+        image = self.normalize(image)
         return image
 
     def to_tensor(self, pic):
@@ -124,10 +127,11 @@ class TransDepthTransDepth(Dataset):
 
             # Open depths
             _depth = np.array(f["distance"], dtype=np.float32)
-            _depth[np.isnan(_depth)] = -1.0
-            _depth[np.isinf(_depth)] = -1.0
-            mask = np.all(_depth == -1.0, axis=0)
-            _depth[:, mask] = 0.0
+            #_depth[np.isnan(_depth)] = -1.0
+            #_depth[np.isinf(_depth)] = -1.0
+            #mask = np.all(_depth == -1.0, axis=0)
+            #_depth[:, mask] = 0.0
+            _depth = np.clip(_depth, 0.01, 5.0)
             _depth = np.expand_dims(_depth, axis=0)
             _depth = np.ascontiguousarray(_depth)
 
@@ -243,6 +247,8 @@ if __name__ == '__main__':
         print('mask shape, type: ', mask.shape, mask.dtype)
         print('mask_forground shape, type: ', mask_forground.shape, mask_forground.dtype)
         print('depth shape, type: ', depth.shape, depth.dtype)
+
+        print(depth[0])
 
         # Show Batch
         dephs= torch.cat((imageTensor2PILTensor(img), depthTensor2rgbTensor(depth)), 2)

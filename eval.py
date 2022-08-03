@@ -29,7 +29,7 @@ import dataloader_nyu
 import dataloader_transDepth
 from utils import framework_eval, model_io
 
-os.environ["CUDA_VISIBLE_DEVICES"] = "2"
+os.environ["CUDA_VISIBLE_DEVICES"] = "6"
 device_ids = [0]
 
 
@@ -260,7 +260,7 @@ if __name__ == '__main__':
             densedepth_model = nn.DataParallel(densedepth_model)
         densedepth_model = densedepth_model.to(device)
 
-    if (config.eval.compareResult and config.eval.dataset  in ['clearGrasp','nyu']) or config.eval.adabin.should_validate:
+    if config.eval.compareResult or config.eval.adabin.should_validate:
         from models.AdaBin import UnetAdaptiveBins
         # Adabin
         adabin_model = UnetAdaptiveBins.build(n_bins=config.eval.adabin.n_bins, min_val=config.eval.min_depth,
@@ -331,6 +331,21 @@ if __name__ == '__main__':
             newCRF_model = nn.DataParallel(newCRF_model)
         newCRF_model = newCRF_model.to(device)
 
+    if (config.eval.compareResult and config.eval.dataset =='transDepth') or config.eval.glp.should_validate:
+        from models.GLPDepth.model import GLPDepth
+        glp_model = GLPDepth(max_depth=config.eval.max_depth, is_train=False)
+        
+        if config.eval.loadProjektCheckpoints:
+            _ , glp_model = model_io.load_checkpoint(config.eval.glp.pathWeightsFile, glp_model)
+        else:
+            glp_model = model_io.load_origin_Checkpoint(config.eval.glp.pathWeightsFile, 'glp', glp_model)
+        
+        # Enable Multi-GPU training
+        if torch.cuda.device_count() > 1:
+            glp_model = nn.DataParallel(glp_model)
+        glp_model = glp_model.to(device)
+        
+
     if (config.eval.compareResult and config.eval.dataset =='transDepth') or config.eval.depthformer.should_validate:
         from depth.models import build_depther
         import mmcv
@@ -354,6 +369,28 @@ if __name__ == '__main__':
         depthformer_model = depthformer_model.to(device)
 
     
+    if (config.eval.compareResult and config.eval.dataset =='transDepth') or config.eval.binsformer.should_validate:
+        from depth.models import build_depther
+        import mmcv
+        cfg = mmcv.Config.fromfile(config.eval.binsformer.modelPath)
+        binsformer_model = build_depther(
+        cfg.model,
+        train_cfg=None,
+        test_cfg=None)
+        del cfg
+        
+        if config.eval.loadProjektCheckpoints:
+            _ , binsformer_model = model_io.load_checkpoint(
+            config.eval.binsformer.pathWeightsFile, binsformer_model)
+        else:
+            binsformer_model = model_io.load_origin_Checkpoint(config.eval.binsformer.pathWeightsFile, 'depthformer', binsformer_model)
+        
+        # Enable Multi-GPU training
+        if torch.cuda.device_count() > 1:
+            binsformer_model = nn.DataParallel(binsformer_model)
+        binsformer_model = binsformer_model.to(device)
+
+    
     ###################### Eval #############################
 
     if config.eval.compareResult:
@@ -368,7 +405,7 @@ if __name__ == '__main__':
             framework_eval.validateAll_old(adabin_model, densedepth_model, dpt_model, lapdepth_model, device, config, dataloaders_dict,
                                    field_names, csv_filename, csv_dir, results_dir, SUBDIR_IMG)
         else:
-            framework_eval.validateAll(dpt_model, depthformer_model, newCRF_model, device, config, dataloaders_dict,
+            framework_eval.validateAll(adabin_model, dpt_model, glp_model, depthformer_model, newCRF_model, binsformer_model, device, config, dataloaders_dict,
                                    field_names, csv_filename, csv_dir, results_dir, SUBDIR_IMG)
     else:
         # else compare only the specified models

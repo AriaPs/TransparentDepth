@@ -27,7 +27,7 @@ from utils.api import depth2rgb, exr_saver
 import loss_functions
 
 
-def validateAll(model_dpt, depthformer_model, newCRF_model, device, config, dataloaders_dict, field_names, csv_filename, csv_dir, results_dir, SUBDIR_IMG):
+def validateAll(model_adabin, model_dpt, model_glp, depthformer_model, newCRF_model, binsformer_model, device, config, dataloaders_dict, field_names, csv_filename, csv_dir, results_dir, SUBDIR_IMG):
     '''Computes the standard evaluation metrics for [model_adabin], [model_densedepth], [model_dpt] from inputs taken of data set 
     listed in [dataloaders_dict] and saves it in the csv file [csv_filename].
     The results are saved in [results_dir] and the images in [results_dir]/[SUBDIR_IMG].
@@ -46,9 +46,13 @@ def validateAll(model_dpt, depthformer_model, newCRF_model, device, config, data
 
     '''
 
+    model_adabin.eval()
     model_dpt.eval()
+    model_glp.eval()
     newCRF_model.eval()
     depthformer_model.eval()
+    binsformer_model.eval()
+
     criterion =loss_functions.SILogLoss()
     metas = getMeta()
     #criterion_ssim = loss_functions.ssim
@@ -67,27 +71,48 @@ def validateAll(model_dpt, depthformer_model, newCRF_model, device, config, data
         metric_dpt = createMetricDict()
         metric_dpt_masked = createMetricDict()
         metric_dpt_masked_opaque = createMetricDict()
-        metric_dpt_masked_forground = createMetricDict()
+        metric_dpt_masked_foreground = createMetricDict()
         metric_dpt_masked_background = createMetricDict()
 
         running_loss_depthformer = 0.0
         metric_depthformer = createMetricDict()
         metric_depthformer_masked = createMetricDict()
         metric_depthformer_masked_opaque = createMetricDict()
-        metric_depthformer_masked_forground = createMetricDict()
+        metric_depthformer_masked_foreground = createMetricDict()
         metric_depthformer_masked_background = createMetricDict()
+
+        running_loss_binsformer = 0.0
+        metric_binsformer = createMetricDict()
+        metric_binsformer_masked = createMetricDict()
+        metric_binsformer_masked_opaque = createMetricDict()
+        metric_binsformer_masked_foreground = createMetricDict()
+        metric_binsformer_masked_background = createMetricDict()
 
         running_loss_newcrf = 0.0
         metric_newcrf = createMetricDict()
         metric_newcrf_masked = createMetricDict()
         metric_newcrf_masked_opaque = createMetricDict()
-        metric_newcrf_masked_forground = createMetricDict()
+        metric_newcrf_masked_foreground = createMetricDict()
         metric_newcrf_masked_background = createMetricDict()
+
+        running_loss_adabin = 0.0
+        metric_adabin = createMetricDict()
+        metric_adabin_masked = createMetricDict()
+        metric_adabin_masked_opaque = createMetricDict()
+        metric_adabin_masked_foreground = createMetricDict()
+        metric_adabin_masked_background = createMetricDict()
+
+        running_loss_glp = 0.0
+        metric_glp = createMetricDict()
+        metric_glp_masked = createMetricDict()
+        metric_glp_masked_opaque = createMetricDict()
+        metric_glp_masked_foreground = createMetricDict()
+        metric_glp_masked_background = createMetricDict()
 
         testLoader = dataloaders_dict[key]
         for ii, sample_batched in enumerate(tqdm(testLoader)):
 
-            inputs, mask, mask_forground, depths = sample_batched
+            inputs, mask, mask_foreground, depths = sample_batched
 
             depths = depths.to(device)
 
@@ -96,14 +121,19 @@ def validateAll(model_dpt, depthformer_model, newCRF_model, device, config, data
                 input = inputs.to(device)
                 model_output_newcrf = newCRF_model(input)
                 model_output_dpt = model_dpt(input)
+                _ , model_output_adabin = model_adabin(input)
+                model_output_glp = model_glp(input.to(device))['pred_d']
+
                 depthformer_model_result = depthformer_model(return_loss=True, depth_gt=depths, img=input, img_metas=metas)
-            
-                #loss_depthformer = depthformer_model_result['decode.loss_depth']
                 model_output_depthformer = depthformer_model_result['decode.depth_pred']
+
+                binsformer_model_result = binsformer_model(return_loss=True, depth_gt=depths, img=input, img_metas=metas)
+                model_output_binsformer = binsformer_model_result['decode.depth']
 
                 # [BXHXW] --> [BX1XHXW]
                 model_output_dpt = torch.unsqueeze(model_output_dpt, 1)
 
+                
             # Compute the loss
 
             loss_newcrf = criterion(model_output_newcrf, depths, mask=mask, interpolate= False)
@@ -112,83 +142,141 @@ def validateAll(model_dpt, depthformer_model, newCRF_model, device, config, data
             loss_depthformer = criterion(model_output_depthformer, depths, mask=mask)
             running_loss_depthformer += loss_depthformer.item()
 
+            loss_binsformer = criterion(model_output_binsformer, depths, mask=mask, interpolate= False)
+            running_loss_binsformer += loss_binsformer.item()
+
             loss_dpt = criterion(model_output_dpt, depths, mask=mask, interpolate= False)
             running_loss_dpt += loss_dpt.item()
 
+            loss_adabin = criterion(model_output_adabin, depths, mask=mask)
+            running_loss_adabin += loss_adabin.item()
+
+            loss_glp = criterion(model_output_glp, depths, mask=mask, interpolate= False)
+            running_loss_glp += loss_glp.item()
+
             model_output_depthformer = resize_pred(model_output_depthformer, depths.shape[-2:], config)
+            model_output_adabin = resize_pred(model_output_adabin, depths.shape[-2:], config)
 
             # Save output images, one at a time, to results
             img_tensor = inputs.detach()
             output_tensor_dpt = model_output_dpt.detach().cpu()
+            output_tensor_adabin = model_output_adabin.detach().cpu()
+            output_tensor_glp = model_output_glp.detach().cpu()
             output_tensor_depthformer = model_output_depthformer.detach().cpu()
+            output_tensor_binsformer = model_output_binsformer.detach().cpu()
             output_tensor_newcrf = model_output_newcrf.detach().cpu()
             depth_tensor = depths.detach().cpu()
             mask_tensor = mask.detach().cpu()
-            mask_forground_tensor = mask_forground.detach().cpu()
+            mask_foreground_tensor = mask_foreground.detach().cpu()
 
             # Extract each tensor within batch and save results
-            for iii, sample_batched in enumerate(zip(img_tensor, output_tensor_dpt, output_tensor_depthformer, output_tensor_newcrf, depth_tensor, mask_tensor, mask_forground_tensor)):
-                img, output_dpt, output_depthformer, output_newcrf, gt, mask, mask_forground = sample_batched
+            for iii, sample_batched in enumerate(zip(img_tensor, output_tensor_adabin, output_tensor_dpt, output_tensor_glp, output_tensor_depthformer, output_tensor_newcrf, output_tensor_binsformer, depth_tensor, mask_tensor, mask_foreground_tensor)):
+                img, output_adabin, output_dpt, output_glp, output_depthformer, output_newcrf, output_binsformer, gt, mask, mask_foreground = sample_batched
                 
                 # Calc metrics
                 metric_dpt, batch_metric_dpt = update_metric(metric_dpt, output_dpt, gt, config.eval.dataset)
+                metric_adabin, batch_metric_adabin = update_metric(metric_adabin, output_adabin, gt, config.eval.dataset)
+                metric_glp, batch_metric_glp = update_metric(metric_glp, output_glp, gt, config.eval.dataset)
                 metric_depthformer, batch_metric_depthformer = update_metric(metric_depthformer, output_depthformer, gt, config.eval.dataset)
                 metric_newcrf, batch_metric_newcrf = update_metric(metric_newcrf, output_newcrf, gt, config.eval.dataset)
+                metric_binsformer, batch_metric_binsformer = update_metric(metric_binsformer, output_binsformer, gt, config.eval.dataset)
 
                 metric_dpt_masked, batch_metric_dpt_masked = update_metric(metric_dpt_masked, output_dpt, gt, config.eval.dataset, mask=mask)
+                metric_adabin_masked, batch_metric_adabin_masked = update_metric(metric_adabin_masked, output_adabin, gt, config.eval.dataset, mask=mask)
+                metric_glp_masked, batch_metric_glp_masked = update_metric(metric_glp_masked, output_glp, gt, config.eval.dataset, mask=mask)
                 metric_depthformer_masked, batch_metric_depthformer_masked = update_metric(metric_depthformer_masked, output_depthformer, gt, config.eval.dataset, mask=mask)
                 metric_newcrf_masked, batch_metric_newcrf_masked = update_metric(metric_newcrf_masked, output_newcrf, gt, config.eval.dataset, mask=mask)
+                metric_binsformer_masked, batch_metric_binsformer_masked = update_metric(metric_binsformer_masked, output_binsformer, gt, config.eval.dataset, mask=mask)
 
                 metric_dpt_masked_opaque, batch_metric_dpt_masked_opaque = update_metric(metric_dpt_masked_opaque, output_dpt, gt, config.eval.dataset, mask=mask, masksZeros=False)
+                metric_glp_masked_opaque, batch_metric_glp_masked_opaque = update_metric(metric_glp_masked_opaque, output_glp, gt, config.eval.dataset, mask=mask, masksZeros=False)
+                metric_adabin_masked_opaque, batch_metric_adabin_masked_opaque = update_metric(metric_adabin_masked_opaque, output_adabin, gt, config.eval.dataset, mask=mask, masksZeros=False)
                 metric_depthformer_masked_opaque, batch_metric_depthformer_masked_opaque = update_metric(metric_depthformer_masked_opaque, output_depthformer, gt, config.eval.dataset, mask=mask, masksZeros=False)
                 metric_newcrf_masked_opaque, batch_metric_newcrf_masked_opaque = update_metric(metric_newcrf_masked_opaque, output_newcrf, gt, config.eval.dataset, mask=mask, masksZeros=False)
+                metric_binsformer_masked_opaque, batch_metric_binsformer_masked_opaque = update_metric(metric_binsformer_masked_opaque, output_binsformer, gt, config.eval.dataset, mask=mask, masksZeros=False)
 
-                metric_dpt_masked_forground, batch_metric_dpt_masked_forground = update_metric(metric_dpt_masked_forground, output_dpt, gt, config.eval.dataset, mask=mask_forground)
-                metric_depthformer_masked_forground, batch_metric_depthformer_masked_forground = update_metric(metric_depthformer_masked_forground, output_depthformer, gt, config.eval.dataset, mask=mask_forground)
-                metric_newcrf_masked_forground, batch_metric_newcrf_masked_forground = update_metric(metric_newcrf_masked_forground, output_newcrf, gt, config.eval.dataset, mask=mask_forground)
-
-                metric_dpt_masked_background, batch_metric_dpt_masked_background = update_metric(metric_dpt_masked_background, output_dpt, gt, config.eval.dataset, mask=mask_forground, masksZeros=False)
-                metric_depthformer_masked_background, batch_metric_depthformer_masked_background = update_metric(metric_depthformer_masked_background, output_depthformer, gt, config.eval.dataset, mask=mask_forground, masksZeros=False)
-                metric_newcrf_masked_background, batch_metric_newcrf_masked_background = update_metric(metric_newcrf_masked_background, output_newcrf, gt, config.eval.dataset, mask=mask_forground, masksZeros=False)
-
+                metric_dpt_masked_foreground, batch_metric_dpt_masked_foreground = update_metric(metric_dpt_masked_foreground, output_dpt, gt, config.eval.dataset, mask=mask_foreground)
+                metric_adabin_masked_foreground, batch_metric_adabin_masked_foreground = update_metric(metric_adabin_masked_foreground, output_adabin, gt, config.eval.dataset, mask=mask_foreground)
+                metric_glp_masked_foreground, batch_metric_glp_masked_foreground = update_metric(metric_glp_masked_foreground, output_glp, gt, config.eval.dataset, mask=mask_foreground)
+                metric_depthformer_masked_foreground, batch_metric_depthformer_masked_foreground = update_metric(metric_depthformer_masked_foreground, output_depthformer, gt, config.eval.dataset, mask=mask_foreground)
+                metric_newcrf_masked_foreground, batch_metric_newcrf_masked_foreground = update_metric(metric_newcrf_masked_foreground, output_newcrf, gt, config.eval.dataset, mask=mask_foreground)
+                metric_binsformer_masked_foreground, batch_metric_binsformer_masked_foreground = update_metric(metric_binsformer_masked_foreground, output_binsformer, gt, config.eval.dataset, mask=mask_foreground)
+                
+                metric_dpt_masked_background, batch_metric_dpt_masked_background = update_metric(metric_dpt_masked_background, output_dpt, gt, config.eval.dataset, mask=mask_foreground, masksZeros=False)
+                metric_glp_masked_background, batch_metric_glp_masked_background = update_metric(metric_glp_masked_background, output_glp, gt, config.eval.dataset, mask=mask_foreground, masksZeros=False)
+                metric_adabin_masked_background, batch_metric_adabin_masked_background = update_metric(metric_adabin_masked_background, output_adabin, gt, config.eval.dataset, mask=mask_foreground, masksZeros=False)
+                metric_depthformer_masked_background, batch_metric_depthformer_masked_background = update_metric(metric_depthformer_masked_background, output_depthformer, gt, config.eval.dataset, mask=mask_foreground, masksZeros=False)
+                metric_newcrf_masked_background, batch_metric_newcrf_masked_background = update_metric(metric_newcrf_masked_background, output_newcrf, gt, config.eval.dataset, mask=mask_foreground, masksZeros=False)
+                metric_binsformer_masked_background, batch_metric_binsformer_masked_background = update_metric(metric_binsformer_masked_background, output_binsformer, gt, config.eval.dataset, mask=mask_foreground, masksZeros=False)
+                
                 # Write the data into a csv file
+                write_csv_row("Adabin", config.eval.batchSize, batch_metric_adabin,
+                              csv_dir, field_names, csv_filename, ii, iii)
                 write_csv_row("DPT", config.eval.batchSize, batch_metric_dpt,
+                              csv_dir, field_names, csv_filename, ii, iii)
+                write_csv_row("GLPDepth", config.eval.batchSize, batch_metric_glp,
                               csv_dir, field_names, csv_filename, ii, iii)
                 write_csv_row("DepthFormer", config.eval.batchSize, batch_metric_depthformer,
                               csv_dir, field_names, csv_filename, ii, iii)
                 write_csv_row("NewCRF", config.eval.batchSize, batch_metric_newcrf,
                               csv_dir, field_names, csv_filename, ii, iii)
+                write_csv_row("Binsformer", config.eval.batchSize, batch_metric_binsformer,
+                              csv_dir, field_names, csv_filename, ii, iii)
 
+                write_csv_row("Adabin masked: Trans", config.eval.batchSize, batch_metric_adabin_masked,
+                              csv_dir, field_names, csv_filename, ii, iii)
                 write_csv_row("DPT masked: Trans", config.eval.batchSize, batch_metric_dpt_masked,
+                              csv_dir, field_names, csv_filename, ii, iii)
+                write_csv_row("GLPDepth masked: Trans", config.eval.batchSize, batch_metric_glp_masked,
                               csv_dir, field_names, csv_filename, ii, iii)
                 write_csv_row("DepthFormer masked: Trans", config.eval.batchSize, batch_metric_depthformer_masked,
                               csv_dir, field_names, csv_filename, ii, iii)
                 write_csv_row("NewCRF masked: Trans", config.eval.batchSize, batch_metric_newcrf_masked,
                               csv_dir, field_names, csv_filename, ii, iii)
+                write_csv_row("Binsformer masked: Trans", config.eval.batchSize, batch_metric_binsformer_masked,
+                              csv_dir, field_names, csv_filename, ii, iii)
 
+                write_csv_row("Adabin masked: Opaque", config.eval.batchSize, batch_metric_adabin_masked_opaque,
+                              csv_dir, field_names, csv_filename, ii, iii)
                 write_csv_row("DPT masked: Opaque", config.eval.batchSize, batch_metric_dpt_masked_opaque,
+                              csv_dir, field_names, csv_filename, ii, iii)
+                write_csv_row("GLPDepth masked: Opaque", config.eval.batchSize, batch_metric_glp_masked_opaque,
                               csv_dir, field_names, csv_filename, ii, iii)
                 write_csv_row("DepthFormer masked: Opaque", config.eval.batchSize, batch_metric_depthformer_masked_opaque,
                               csv_dir, field_names, csv_filename, ii, iii)
                 write_csv_row("NewCRF masked: Opaque", config.eval.batchSize, batch_metric_newcrf_masked_opaque,
                               csv_dir, field_names, csv_filename, ii, iii)
-
-                write_csv_row("DPT masked: forground", config.eval.batchSize, batch_metric_dpt_masked_forground,
-                              csv_dir, field_names, csv_filename, ii, iii)
-                write_csv_row("DepthFormer masked: forground", config.eval.batchSize, batch_metric_depthformer_masked_forground,
-                              csv_dir, field_names, csv_filename, ii, iii)
-                write_csv_row("NewCRF masked: forground", config.eval.batchSize, batch_metric_newcrf_masked_forground,
+                write_csv_row("Binsformer masked: Opaque", config.eval.batchSize, batch_metric_binsformer_masked_opaque,
                               csv_dir, field_names, csv_filename, ii, iii)
 
+                write_csv_row("Adabin masked: foreground", config.eval.batchSize, batch_metric_adabin_masked_foreground,
+                              csv_dir, field_names, csv_filename, ii, iii)
+                write_csv_row("DPT masked: foreground", config.eval.batchSize, batch_metric_dpt_masked_foreground,
+                              csv_dir, field_names, csv_filename, ii, iii)
+                write_csv_row("GLPDepth masked: foreground", config.eval.batchSize, batch_metric_glp_masked_foreground,
+                              csv_dir, field_names, csv_filename, ii, iii)
+                write_csv_row("DepthFormer masked: foreground", config.eval.batchSize, batch_metric_depthformer_masked_foreground,
+                              csv_dir, field_names, csv_filename, ii, iii)
+                write_csv_row("NewCRF masked: foreground", config.eval.batchSize, batch_metric_newcrf_masked_foreground,
+                              csv_dir, field_names, csv_filename, ii, iii)
+                write_csv_row("Binsformer masked: foreground", config.eval.batchSize, batch_metric_binsformer_masked_foreground,
+                              csv_dir, field_names, csv_filename, ii, iii)
+
+                write_csv_row("Adabin masked: background", config.eval.batchSize, batch_metric_adabin_masked_background,
+                              csv_dir, field_names, csv_filename, ii, iii)
                 write_csv_row("DPT masked: background", config.eval.batchSize, batch_metric_dpt_masked_background,
+                              csv_dir, field_names, csv_filename, ii, iii)
+                write_csv_row("GLPDepth masked: background", config.eval.batchSize, batch_metric_glp_masked_background,
                               csv_dir, field_names, csv_filename, ii, iii)
                 write_csv_row("DepthFormer masked: background", config.eval.batchSize, batch_metric_depthformer_masked_background,
                               csv_dir, field_names, csv_filename, ii, iii)
                 write_csv_row("NewCRF masked: background", config.eval.batchSize, batch_metric_newcrf_masked_background,
                               csv_dir, field_names, csv_filename, ii, iii)
+                write_csv_row("Binsformer masked: background", config.eval.batchSize, batch_metric_binsformer_masked_background,
+                              csv_dir, field_names, csv_filename, ii, iii)
 
                 if config.eval.saveCompareImage:
-                    save_compare_images(img, output_dpt, output_depthformer, output_newcrf,
+                    save_compare_images(img, output_adabin, output_dpt, output_glp, output_depthformer, output_newcrf, output_binsformer,
                                     gt, config, results_dir, SUBDIR_IMG, ii, iii, key)
 
         num_batches = len(testLoader)  # Num of batches
@@ -196,31 +284,52 @@ def validateAll(model_dpt, depthformer_model, newCRF_model, device, config, data
         print('\nnum_batches:', num_batches)
         print('num_images:', num_images)
         epoch_loss_dpt = running_loss_dpt / num_batches
+        epoch_loss_adabin = running_loss_adabin / num_batches
+        epoch_loss_glp = running_loss_glp / num_batches
         epoch_loss_depthformer = running_loss_depthformer / num_batches
         epoch_loss_newcrf = running_loss_newcrf / num_batches
+        epoch_loss_binsformer = running_loss_binsformer / num_batches
+        print('Test Mean Loss Adabin: {:.4f} \n'.format(epoch_loss_adabin))
         print('Test Mean Loss DPT: {:.4f} \n'.format(epoch_loss_dpt))
+        print('Test Mean Loss GLPDepth: {:.4f} \n'.format(epoch_loss_glp))
         print('Test Mean Loss DepthFormer: {:.4f} \n'.format(epoch_loss_depthformer))
         print('Test Mean Loss newcrf: {:.4f} \n'.format(epoch_loss_newcrf))
+        print('Test Mean Loss Binsformer: {:.4f} \n'.format(epoch_loss_binsformer))
 
+        print_means(metric_adabin, num_images, "Adabin", csv_dir, csv_filename, field_names)
         print_means(metric_dpt, num_images, "DPT", csv_dir, csv_filename, field_names)
+        print_means(metric_glp, num_images, "GLPDepth", csv_dir, csv_filename, field_names)
         print_means(metric_depthformer, num_images, "DepthFormer", csv_dir, csv_filename, field_names)
         print_means(metric_newcrf, num_images, "NewCRF", csv_dir, csv_filename, field_names)
+        print_means(metric_binsformer, num_images, "Binsformer", csv_dir, csv_filename, field_names)
 
+        print_means(metric_adabin_masked, num_images, "Adabin masked: Trans", csv_dir, csv_filename, field_names)
         print_means(metric_dpt_masked, num_images, "DPT masked: Trans", csv_dir, csv_filename, field_names)
+        print_means(metric_glp_masked, num_images, "GLPDepth masked: Trans", csv_dir, csv_filename, field_names)
         print_means(metric_depthformer_masked, num_images, "DepthFormer masked: Trans", csv_dir, csv_filename, field_names)
         print_means(metric_newcrf_masked, num_images, "NewCRF masked: Trans", csv_dir, csv_filename, field_names)
+        print_means(metric_binsformer_masked, num_images, "Binsformer masked: Trans", csv_dir, csv_filename, field_names)
 
+        print_means(metric_adabin_masked_opaque, num_images, "Adabin masked: Opaque", csv_dir, csv_filename, field_names)
         print_means(metric_dpt_masked_opaque, num_images, "DPT masked: Opaque", csv_dir, csv_filename, field_names)
+        print_means(metric_glp_masked_opaque, num_images, "GLPDepth masked: Opaque", csv_dir, csv_filename, field_names)
         print_means(metric_depthformer_masked_opaque, num_images, "DepthFormer masked: Opaque", csv_dir, csv_filename, field_names)
         print_means(metric_newcrf_masked_opaque, num_images, "NewCRF masked: Opaque", csv_dir, csv_filename, field_names)
+        print_means(metric_binsformer_masked_opaque, num_images, "Binsformer masked: Opaque", csv_dir, csv_filename, field_names)
 
-        print_means(metric_dpt_masked_forground, num_images, "DPT masked: forground", csv_dir, csv_filename, field_names)
-        print_means(metric_depthformer_masked_forground, num_images, "DepthFormer masked: forground", csv_dir, csv_filename, field_names)
-        print_means(metric_newcrf_masked_forground, num_images, "NewCRF masked: forground", csv_dir, csv_filename, field_names)
+        print_means(metric_adabin_masked_foreground, num_images, "Adabin masked: foreground", csv_dir, csv_filename, field_names)
+        print_means(metric_dpt_masked_foreground, num_images, "DPT masked: foreground", csv_dir, csv_filename, field_names)
+        print_means(metric_glp_masked_foreground, num_images, "GLPDepth masked: foreground", csv_dir, csv_filename, field_names)
+        print_means(metric_depthformer_masked_foreground, num_images, "DepthFormer masked: foreground", csv_dir, csv_filename, field_names)
+        print_means(metric_newcrf_masked_foreground, num_images, "NewCRF masked: foreground", csv_dir, csv_filename, field_names)
+        print_means(metric_binsformer_masked_foreground, num_images, "Binsformer masked: foreground", csv_dir, csv_filename, field_names)
 
+        print_means(metric_adabin_masked_background, num_images, "Adabin masked: background", csv_dir, csv_filename, field_names)
         print_means(metric_dpt_masked_background, num_images, "DPT masked: background", csv_dir, csv_filename, field_names)
+        print_means(metric_glp_masked_background, num_images, "GLPDepth masked: background", csv_dir, csv_filename, field_names)
         print_means(metric_depthformer_masked_background, num_images, "DepthFormer masked: background", csv_dir, csv_filename, field_names)
         print_means(metric_newcrf_masked_background, num_images, "NewCRF masked: background", csv_dir, csv_filename, field_names)
+        print_means(metric_binsformer_masked_background, num_images, "Binsformer masked: background", csv_dir, csv_filename, field_names)
 
 def validateAll_old(model_adabin, model_densedepth, model_dpt, model_lapdepth, device, config, dataloaders_dict, field_names, csv_filename, csv_dir, results_dir, SUBDIR_IMG):
     '''Computes the standard evaluation metrics for [model_adabin], [model_densedepth], [model_dpt] from inputs taken of data set 
@@ -298,7 +407,6 @@ def validateAll_old(model_adabin, model_densedepth, model_dpt, model_lapdepth, d
             # Compute the loss
 
             loss_adabin = criterion(model_output_adabin, depths, mask=mask)
-
             running_loss_adabin += loss_adabin.item()
 
             loss_densedepth = criterion(model_output_densedepth, depths, mask=mask)
@@ -859,7 +967,7 @@ def save_images(input_image, output, gt, config, results_dir, SUBDIR_IMG, dataLo
     grid_image = np.concatenate((img_rgb, gt_rgb, output_rgb), 1)
     imageio.imwrite(gt_output_path_rgb, grid_image)
 
-def save_compare_images(input_image, output_dpt, output_depthformer, output_newcrf, gt, config, results_dir, SUBDIR_IMG, dataLoader_index, batch_index, set_name, norm=5):
+def save_compare_images(input_image, output_adabin, output_dpt, output_glp, output_depthformer, output_newcrf, output_binsformer, gt, config, results_dir, SUBDIR_IMG, dataLoader_index, batch_index, set_name, norm=5):
     '''Generates for  [input_image], [gt], [output_densedepth], [output_adabin], and [output_dpt] a grid image having their depth map visualizations and 
     saves it in  [results_dir]/[SUBDIR_IMG].
 
@@ -885,6 +993,14 @@ def save_compare_images(input_image, output_dpt, output_depthformer, output_newc
     output_rgb_dpt = cv2.resize(
         output_rgb_dpt, size, interpolation=cv2.INTER_LINEAR)
 
+    output_rgb_adabin = depth2rgb(output_adabin[0])
+    output_rgb_adabin = cv2.resize(
+        output_rgb_adabin, size, interpolation=cv2.INTER_LINEAR)
+
+    output_rgb_glp = depth2rgb(output_glp[0])
+    output_rgb_glp = cv2.resize(
+        output_rgb_glp, size, interpolation=cv2.INTER_LINEAR)
+
     output_rgb_output_depthformer = depth2rgb(output_depthformer[0])
     output_rgb_output_depthformer = cv2.resize(
         output_rgb_output_depthformer, size, interpolation=cv2.INTER_LINEAR)
@@ -892,6 +1008,10 @@ def save_compare_images(input_image, output_dpt, output_depthformer, output_newc
     output_rgb_newcrf = depth2rgb(output_newcrf[0])
     output_rgb_newcrf = cv2.resize(
         output_rgb_newcrf, size, interpolation=cv2.INTER_LINEAR)
+
+    output_rgb_output_binsformer = depth2rgb(output_binsformer[0])
+    output_rgb_output_binsformer = cv2.resize(
+        output_rgb_output_binsformer, size, interpolation=cv2.INTER_LINEAR)
 
     
 
@@ -908,7 +1028,7 @@ def save_compare_images(input_image, output_dpt, output_depthformer, output_newc
                                        '{:09d}-{}-img-gt-outputs.png'.format(name_prefix, set_name))
 
     grid_image = np.concatenate(
-        (img, gt_rgb, output_rgb_dpt, output_rgb_output_depthformer, output_rgb_newcrf), 1)
+        (img, gt_rgb, output_rgb_adabin, output_rgb_dpt, output_rgb_glp, output_rgb_output_depthformer, output_rgb_newcrf, output_rgb_output_binsformer), 1)
 
     imageio.imwrite(img_gt_output_paths_rgb, grid_image)
 
@@ -918,6 +1038,16 @@ def save_compare_images(input_image, output_dpt, output_depthformer, output_newc
         output_rgb_dpt_normed = depth2rgb(output_dpt_normed)
         output_rgb_dpt_normed = cv2.resize(
             output_rgb_dpt_normed, size, interpolation=cv2.INTER_LINEAR)
+
+        output_adabin_normed = torch.nn.functional.normalize(output_adabin[0]) * norm
+        output_rgb_adabin_normed = depth2rgb(output_adabin_normed)
+        output_rgb_adabin_normed = cv2.resize(
+            output_rgb_adabin_normed, size, interpolation=cv2.INTER_LINEAR)
+
+        output_glp_normed = torch.nn.functional.normalize(output_glp[0]) * norm
+        output_rgb_glp_normed = depth2rgb(output_glp_normed)
+        output_rgb_glp_normed = cv2.resize(
+            output_rgb_glp_normed, size, interpolation=cv2.INTER_LINEAR)
 
         output_depthformer_normed = torch.nn.functional.normalize(output_depthformer[0]) * norm
         output_rgb_depthformer_normed = depth2rgb(output_depthformer_normed)
@@ -929,6 +1059,11 @@ def save_compare_images(input_image, output_dpt, output_depthformer, output_newc
         output_rgb_newcrf_normed = cv2.resize(
             output_rgb_newcrf_normed, size, interpolation=cv2.INTER_LINEAR)
 
+        output_binsformer_normed = torch.nn.functional.normalize(output_binsformer[0]) * norm
+        output_rgb_binsformer_normed = depth2rgb(output_binsformer_normed)
+        output_rgb_binsformer_normed = cv2.resize(
+            output_rgb_binsformer_normed, size, interpolation=cv2.INTER_LINEAR)
+
         img_gt_output_paths_rgb = os.path.join(results_dir, SUBDIR_IMG,
                                            '{:09d}-{}-img-gt-outputs-normed.png'.format(name_prefix, set_name))
 
@@ -936,7 +1071,7 @@ def save_compare_images(input_image, output_dpt, output_depthformer, output_newc
         gt_rgb = cv2.resize(gt_rgb, size, interpolation=cv2.INTER_LINEAR)
 
         grid_image = np.concatenate(
-            (img, gt_rgb, output_rgb_dpt_normed, output_rgb_depthformer_normed, output_rgb_newcrf_normed), 1)
+            (img, gt_rgb, output_rgb_adabin_normed, output_rgb_dpt_normed, output_rgb_glp_normed, output_rgb_depthformer_normed, output_rgb_newcrf_normed, output_rgb_binsformer_normed), 1)
 
         imageio.imwrite(img_gt_output_paths_rgb, grid_image)
 
@@ -964,6 +1099,16 @@ def save_compare_images(input_image, output_dpt, output_depthformer, output_newc
                                            '{:09d}-{}-depth-depthformer.exr'.format(name_prefix, set_name))
                                            
         exr_saver(save_path_exr, output_depthformer[0].numpy())
+
+        save_path_exr = os.path.join(results_dir, SUBDIR_IMG,
+                                           '{:09d}-{}-depth-binsformer-normed.exr'.format(name_prefix, set_name))
+    
+        exr_saver(save_path_exr, output_binsformer_normed.numpy())
+    
+        save_path_exr = os.path.join(results_dir, SUBDIR_IMG,
+                                           '{:09d}-{}-depth-binsformer.exr'.format(name_prefix, set_name))
+                                           
+        exr_saver(save_path_exr, output_binsformer[0].numpy())
     
         save_path_exr = os.path.join(results_dir, SUBDIR_IMG,
                                            '{:09d}-{}-depth-dpt-normed.exr'.format(name_prefix, set_name))
@@ -974,6 +1119,26 @@ def save_compare_images(input_image, output_dpt, output_depthformer, output_newc
                                            '{:09d}-{}-depth-dpt.exr'.format(name_prefix, set_name))
                                            
         exr_saver(save_path_exr, output_dpt[0].numpy())
+
+        save_path_exr = os.path.join(results_dir, SUBDIR_IMG,
+                                           '{:09d}-{}-depth-glp-normed.exr'.format(name_prefix, set_name))
+    
+        exr_saver(save_path_exr, output_glp_normed.numpy())
+    
+        save_path_exr = os.path.join(results_dir, SUBDIR_IMG,
+                                           '{:09d}-{}-depth-glp.exr'.format(name_prefix, set_name))
+                                           
+        exr_saver(save_path_exr, output_glp[0].numpy())
+
+        save_path_exr = os.path.join(results_dir, SUBDIR_IMG,
+                                           '{:09d}-{}-depth-adabin-normed.exr'.format(name_prefix, set_name))
+    
+        exr_saver(save_path_exr, output_adabin_normed.numpy())
+    
+        save_path_exr = os.path.join(results_dir, SUBDIR_IMG,
+                                           '{:09d}-{}-depth-adabin.exr'.format(name_prefix, set_name))
+                                           
+        exr_saver(save_path_exr, output_adabin[0].numpy())
  
 def save_compare_images_old(input_image, output_adabin, output_densedepth, output_dpt, output_lapdepth, gt, config, results_dir, SUBDIR_IMG, dataLoader_index, batch_index, set_name, norm=4):
     '''Generates for  [input_image], [gt], [output_densedepth], [output_adabin], and [output_dpt] a grid image having their depth map visualizations and 

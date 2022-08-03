@@ -27,7 +27,7 @@ import io
 import os
 import shutil
 
-os.environ["CUDA_VISIBLE_DEVICES"] = "4"
+os.environ["CUDA_VISIBLE_DEVICES"] = "6"
 device_ids = [0]
 
 
@@ -313,7 +313,7 @@ def loadClearGraspDataSet(config):
     return trainLoader, syntheticValidationLoader, realValidationLoader
 
 def loadtransDepthDataSet(config):
-    validationLoader = dataloader_transDepth.TransDepthDataLoader(config.train.transDepthDatasetVal, config.train.batchSize, config.train.numWorkers, 'test').data
+    validationLoader = dataloader_transDepth.TransDepthDataLoader(config.train.transDepthDatasetVal, config.train.batchSize, config.train.numWorkers, 'val').data
 
     trainLoader = dataloader_transDepth.TransDepthDataLoader(config.train.transDepthDatasetTrain, config.train.batchSize, config.train.numWorkers, 'train').data
 
@@ -380,8 +380,21 @@ def train(gpu, config, writer):
         cfg.model,
         train_cfg=None,
         test_cfg=None)
-        model.init_weights()
+        #model.init_weights()
         del cfg
+    elif config.train.model == 'binsformer':
+        from depth.models import build_depther
+        import mmcv
+        cfg = mmcv.Config.fromfile(config.train.binsformer.modelPath)
+        model = build_depther(
+        cfg.model,
+        train_cfg=None,
+        test_cfg=None)
+        #model.init_weights()
+        del cfg
+    elif config.train.model == 'glp':
+        from models.GLPDepth.model import GLPDepth
+        model = GLPDepth(max_depth=config.train.max_depth, is_train=False)
     else:
         raise ValueError(
             'Invalid model "{}" in config file. Must be one of ["densedepth", "adabin", "dpt"]'
